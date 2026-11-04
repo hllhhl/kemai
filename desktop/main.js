@@ -16,23 +16,28 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 
-const ROOT = path.resolve(__dirname, '..');
+// 开发时根目录是项目目录；装成 exe 后是 resources 目录（extraResources 都放在这里）
+const ROOT = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..');
 const PORT = Number(process.env.KEMAI_PORT || 8000);
 const BASE = `http://127.0.0.1:${PORT}`;
-const PYTHON = path.join(ROOT, '.venv', 'Scripts', 'python.exe');
+const PYTHON_CANDIDATES = [
+  path.join(ROOT, 'venv', 'Scripts', 'python.exe'),
+  path.join(ROOT, '.venv', 'Scripts', 'python.exe'),
+  path.join(path.resolve(__dirname, '..'), '.venv', 'Scripts', 'python.exe'),
+];
+const PYTHON = PYTHON_CANDIDATES.find((candidate) => fs.existsSync(candidate)) || PYTHON_CANDIDATES[0];
 const ICON = path.join(ROOT, 'assets', 'kemai.ico');
 
-const SELFTEST = process.argv.includes('--selftest');
-const SHOT_PATH = (() => {
-  const hit = process.argv.find((arg) => arg.startsWith('--screenshot='));
-  return hit ? hit.slice('--screenshot='.length) : path.join(ROOT, '_package', 'desktop-selftest.png');
-})();
+// 打包后的 exe 会把自定义参数当成 Chromium 开关而报 bad option，
+// 所以自检开关走环境变量。
+const SELFTEST = process.env.KEMAI_SELFTEST === '1';
+const SHOT_PATH = process.env.KEMAI_SHOT || path.join(ROOT, '_package', 'desktop-selftest.png');
 
 let backend = null;
 let win = null;
 let quitting = false;
 
-function log(...args) { if (!SELFTEST) console.log('[课脉]', ...args); }
+function log(...args) { console.log('[课脉]', ...args); }
 
 function portOpen() {
   return new Promise((resolve) => {
@@ -122,7 +127,7 @@ html,body{height:100%;margin:0;background:#fffdf8;color:#201d19;
 .t{font-size:15px;font-weight:600}.s{color:#857c70;font-size:12.5px}
 </style></head><body><div class="mark">课</div><div class="t">课脉</div><div class="s">正在启动本地服务…</div></body></html>`));
 
-  win.once('ready-to-show', () => { if (!SELFTEST) win.show(); });
+  win.once('ready-to-show', () => { win.show(); });
 
   // 站内链接留在窗口里，外部链接交给系统浏览器
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -161,7 +166,8 @@ async function boot() {
   await win.loadURL(BASE + '/');
 
   if (SELFTEST) {
-    await new Promise((resolve) => setTimeout(resolve, 2500));
+    win.show();
+    await new Promise((resolve) => setTimeout(resolve, 3000));
     const image = await win.webContents.capturePage();
     fs.mkdirSync(path.dirname(SHOT_PATH), { recursive: true });
     fs.writeFileSync(SHOT_PATH, image.toPNG());
@@ -181,7 +187,9 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     boot().catch((error) => {
-      dialog.showErrorBox('课脉 · 启动异常', String(error && error.message ? error.message : error));
+      const message = String(error && error.message ? error.message : error);
+      console.error('[课脉] 启动异常：' + message);
+      if (!SELFTEST) dialog.showErrorBox('课脉 · 启动异常', message);
       quitting = true;
       stopBackend();
       app.quit();
