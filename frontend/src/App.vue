@@ -435,7 +435,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
               <form class="chat-composer" @submit.prevent="sendQuestion"><div v-if="chatting" class="chat-status"><span class="pulse-dot"></span>{{ chatStatus || '正在生成回答…' }}<button type="button" class="text-button" @click="stopChat()">停止生成</button></div><div v-if="indexRepairRequired" class="composer-notice">课程检索索引需要修复，请点击上方“重新建立索引”。</div><div v-else-if="!modelConfigured" class="composer-notice">配置聊天模型后，即可使用复习问答。</div><div v-else-if="!readyCount && !currentChatContext && !currentNoteContext" class="composer-notice">先上传并处理至少一份资料，再开始提问。</div><div class="composer-input"><textarea v-model="question" rows="2" :disabled="!canChat || chatting" :placeholder="currentChatContext ? '直接问这道题，也可以结合你的作答追问…' : currentNoteContext ? '围绕选中的笔记段落继续追问…' : '围绕课程资料提问，或继续追问…'" aria-label="复习问题" @keydown="keyboard"></textarea><button class="send-button" aria-label="发送问题" :disabled="!question.trim() || !canChat || chatting">↑</button></div><div class="composer-footer"><span>Enter 发送 · Shift + Enter 换行</span><span>基于当前课程资料回答</span></div></form>
             </div></aside>
         </div>
-        <footer class="page-footer"><span>知页 · 课程复习工作台</span><span>资料与学习记录保存在本机</span></footer>
+        <footer class="page-footer"><span>课脉 · 课程知识体系 Agent</span><span>资料与学习记录保存在本机</span></footer>
       </main>
     </div>
     <SourceDrawer v-if="showDrawer" :source="source" :loading="sourceLoading" :error="sourceError" @close="closePreview" />
