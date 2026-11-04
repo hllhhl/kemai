@@ -131,7 +131,11 @@ def _method(ptr, index: int, restype, *argtypes):
 
 
 def make_shortcut(target: Path) -> Path:
-    """在桌面建 课脉.lnk，指向启动脚本，并用我们自己的图标。"""
+    """在桌面建 课脉.lnk。
+
+    优先指向 Electron 可执行文件（独立窗口、无控制台黑框）；
+    没有装 Electron 时退回启动脚本（浏览器模式）。
+    """
     desktop = Path(os.path.expanduser("~/Desktop"))
     if not desktop.exists():
         desktop = Path(os.path.expanduser("~/OneDrive/Desktop"))
@@ -149,8 +153,18 @@ def make_shortcut(target: Path) -> Path:
     def call(index, restype, *argtypes, args=()):
         return _method(ptr, index, restype, *argtypes)(ptr, *args)
 
-    call(20, ctypes.HRESULT, c_wchar_p, args=(str(target),))                 # SetPath
-    call(9, ctypes.HRESULT, c_wchar_p, args=(str(target.parent),))           # SetWorkingDirectory
+    electron = ROOT / "desktop" / "node_modules" / "electron" / "dist" / "electron.exe"
+    if electron.exists():
+        program, workdir, arguments = electron, ROOT / "desktop", f'"{ROOT / "desktop"}"'
+        print("桌面入口：Electron 独立窗口")
+    else:
+        program, workdir, arguments = target, target.parent, ""
+        print("桌面入口：启动脚本（未检测到 Electron）")
+
+    call(20, ctypes.HRESULT, c_wchar_p, args=(str(program),))                # SetPath
+    call(9, ctypes.HRESULT, c_wchar_p, args=(str(workdir),))                 # SetWorkingDirectory
+    if arguments:
+        call(11, ctypes.HRESULT, c_wchar_p, args=(arguments,))               # SetArguments
     call(7, ctypes.HRESULT, c_wchar_p, args=("课脉 · 课程知识体系 Agent",))    # SetDescription
     call(17, ctypes.HRESULT, c_wchar_p, c_int, args=(str(ICON), 0))          # SetIconLocation
 

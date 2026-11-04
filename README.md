@@ -119,7 +119,27 @@ SQLite FTS5 BM25 负责精确术语和代码名，本地 Granite 311M 多语言�
 
 在 [Releases](https://github.com/Lykon661/zhiye-review-agent/releases) 下载 `Zhiye-版本-windows-x64.zip`，并下载同一 release 里的模型包 `Zhiye-models-编号.zip`，两个都解压到同一目录后双击 **启动知页.cmd**，浏览器打开 `http://127.0.0.1:8000/`。运行环境和本地识别模型都随包提供，模型包只需首次下载；问答仍需配置自己的模型服务。详见 [便携版说明](docs/PORTABLE.md)。
 
-### 从源码运行
+### 桌面应用（推荐）
+
+双击桌面「课脉」图标即可，**不会弹黑色控制台窗口**。
+
+它其实是一个 Electron 外壳，做三件事：
+
+1. 静默拉起本地 Python 后端（`windowsHide`，无控制台）；
+2. 等 `/health` 通过后，把界面加载进独立窗口（无地址栏、无菜单栏）；
+3. 关窗时把后端进程树一起收掉，不留孤儿进程占端口。
+
+界面由后端在同一个端口托管（`/` 挂 `frontend/dist`），所以整机只跑一个 Python 进程，
+不需要 vite dev server，也不用开浏览器。
+
+```bash
+npm install --prefix desktop          # 装 Electron（走 npmmirror 镜像）
+npm start --prefix desktop            # 开发模式启动
+```
+
+重建桌面图标：`uv run python scripts/make_app_assets.py`
+
+## 从源码运行
 
 需要 Python 3.11、[uv](https://docs.astral.sh/uv/) 0.11.7+、Node.js 22.19+；解析 DOC/PPT/RTF 另需 JDK 11+（只用 PDF/DOCX/PPTX/图片时可加 `-SkipTika` 跳过）。
 

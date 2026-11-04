@@ -1,0 +1,14 @@
+{
+  "name": "kemai-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "课脉桌面外壳：拉起本地后端并加载界面",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "selftest": "electron . --selftest"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11"
+  }
+}
