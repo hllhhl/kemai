@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "课脉 · 视频伴侣",
+  "version": "0.1.0",
+  "description": "在 B 站页面抓取公开可见字幕与画面关键帧，回传本地运行的知页。仅个人学习使用，不下载视频、不破解会员。",
+  "permissions": ["storage", "activeTab", "scripting", "tabs"],
+  "host_permissions": [
+    "https://www.bilibili.com/*",
+    "https://api.bilibili.com/*",
+    "http://127.0.0.1:8000/*",
+    "http://localhost:8000/*"
+  ],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup/popup.html", "default_title": "知页 · 视频伴侣" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.bilibili.com/video/*", "https://www.bilibili.com/list/*"],
+      "js": ["content/common.js", "content/bilibili.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

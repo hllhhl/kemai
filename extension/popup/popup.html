@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>知页 · 视频伴侣</title>
+<style>
+  body{width:290px;margin:0;padding:14px;font:13px/1.6 -apple-system,"Microsoft YaHei",sans-serif;color:#201d19;background:#fffdf8}
+  h1{font-size:15px;margin:0 0 4px}
+  p.hint{font-size:11.5px;color:#857c70;margin:0 0 12px}
+  label{display:block;font-size:11.5px;color:#857c70;margin:10px 0 4px}
+  input,select{width:100%;padding:6px 8px;border:1px solid #e3ddd1;border-radius:6px;background:#fff;font:inherit;color:inherit}
+  button{width:100%;margin-top:10px;padding:8px;border:1px solid #a4432a;border-radius:6px;background:#a4432a;color:#fff;cursor:pointer;font-weight:600}
+  button.ghost{background:#fff;color:#4a443c;border-color:#e3ddd1;font-weight:400;margin-top:6px}
+  #status{font-size:11.5px;margin-top:10px;padding:7px 9px;background:#faf7f0;border-radius:6px;color:#4a443c;line-height:1.6}
+</style>
+</head>
+<body>
+  <h1>知页 · 视频伴侣</h1>
+  <p class="hint">先在知页里建好课程，再在这里选同一门课。</p>
+  <label>知页地址</label>
+  <input id="api" placeholder="http://127.0.0.1:8000" />
+  <label>课程</label>
+  <select id="course"><option value="">加载中…</option></select>
+  <label>怎么取视频里的内容</label>
+  <select id="mode">
+    <option value="auto">自动（先试字幕，没有就截画面识别）</option>
+    <option value="subtitle">只用字幕（需要你在浏览器里已登录 B 站）</option>
+    <option value="ocr">只用画面识别（不借用登录态，全程本地）</option>
+  </select>
+  <div id="modehint" class="hint"></div>
+  <button id="save">保存并打开面板</button>
+  <button id="reload" class="ghost">重新读取课程</button>
+  <div id="status">就绪</div>
+  <script src="popup.js"></script>
+</body>
+</html>

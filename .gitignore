@@ -1,0 +1,35 @@
+.venv/
+formula-worker/.venv/
+.runtime/
+.cache/
+.ccg/
+data/
+validation/
+.env
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+backend/tests/.parser-validation/
+*.pyc
+*.tsbuildinfo
+frontend/node_modules/
+model-runtime/node_modules/
+frontend/dist/
+/dist/
+*.log
+
+# Private notes and local housekeeping reports; never published.
+/private/
+/docs/清理记录.md
+/docs/文件空间明细.csv
+
+# Local editor and operating-system files.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# B 站登录凭证，绝不能入库
+bili-session.json
