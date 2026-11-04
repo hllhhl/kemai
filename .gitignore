@@ -33,3 +33,6 @@ Desktop.ini
 
 # B 站登录凭证，绝不能入库
 bili-session.json
+
+# 打包产物
+_package/

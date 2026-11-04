@@ -35,10 +35,10 @@ def included(path: Path) -> bool:
 
 
 def main() -> int:
-    desktop = Path(os.path.expanduser("~/Desktop"))
-    if not desktop.exists():
-        desktop = Path(os.path.expanduser("~/OneDrive/Desktop"))
-    target = desktop / f"课脉-v{VERSION}-源码.zip"
+    # 不往桌面丢东西：产物统一放项目的 _package/ 目录
+    out_dir = ROOT / "_package"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / f"课脉-v{VERSION}-源码.zip"
 
     files: list[tuple[Path, str]] = []
     for path in ROOT.rglob("*"):
