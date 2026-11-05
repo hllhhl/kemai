@@ -516,6 +516,5 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
       @navigate="section = $event as Section"
       @open-models="modelSettingsOpen = true"
     />
-    <WorkspaceDialog :open="workspaceOpen" @close="workspaceOpen = false" />
   </div>
 </template>

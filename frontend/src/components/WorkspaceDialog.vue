@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { api } from '../api'
+import { api, API_BASE } from '../api'
 
 type Tool = { name: string; description: string; read_only: boolean; destructive: boolean; schema: Record<string, any> }
 type Server = { name: string; disabled: boolean; command: string; tools: Tool[]; error: string; version: string }
@@ -122,15 +122,66 @@ const agentRun = ref<AgentRun | null>(null)
 const agentBusy = ref(false)
 const tools = ref<{ name: string; description: string; read_only: boolean }[]>([])
 
+function handleAgentEvent(event: { type: string; [key: string]: unknown }) {
+  const run = agentRun.value
+  if (!run) return
+  if (event.type === 'run') {
+    run.id = String(event.run_id || '')
+    run.max_turns = Number(event.max_turns || run.max_turns)
+  } else if (event.type === 'step') {
+    const step = event.step as AgentStep
+    run.steps.push(step)
+    run.turn = step.turn
+  } else if (event.type === 'blocked') {
+    run.pending = event.pending as AgentRun['pending']
+    run.status = 'blocked'
+  } else if (event.type === 'final') {
+    run.answer = String(event.answer || '')
+    run.status = 'done'
+  } else if (event.type === 'error') {
+    run.status = 'failed'
+    run.answer = String(event.message || '出错了')
+  }
+}
+
 async function startAgent() {
   if (!agentGoal.value.trim() || agentBusy.value) return
   agentBusy.value = true
   importError.value = ''
-  agentRun.value = null
+  // 先放一个空壳，事件一到就往里填——否则第一轮模型调用那 10 秒界面是空的
+  agentRun.value = { id: '', status: 'running', answer: '', steps: [], pending: null, turn: 0, max_turns: 6 }
   try {
-    agentRun.value = await api<AgentRun>('/agent/run', { method: 'POST', body: JSON.stringify({ goal: agentGoal.value.trim(), max_turns: 6 }) })
+    const response = await fetch(`${API_BASE}/agent/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal: agentGoal.value.trim(), max_turns: 6 }),
+    })
+    if (!response.ok) throw new Error(`请求失败（${response.status}）`)
+    if (!response.body) throw new Error('浏览器不支持流式响应')
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      // 事件之间用空行分隔；最后一段可能不完整，留在 buffer 里等下一次
+      const chunks = buffer.split(String.fromCharCode(10, 10))
+      buffer = chunks.pop() || ''
+      for (const chunk of chunks) {
+        const line = chunk.split(String.fromCharCode(10)).find((item) => item.startsWith('data: '))
+        if (!line) continue
+        try {
+          handleAgentEvent(JSON.parse(line.slice(6)))
+        } catch {
+          /* 半截 JSON 就跳过，下一段会补上 */
+        }
+      }
+    }
   } catch (e) {
     importError.value = e instanceof Error ? e.message : String(e)
+    if (agentRun.value) agentRun.value.status = 'failed'
   } finally {
     agentBusy.value = false
   }
@@ -364,6 +415,8 @@ watch(() => props.open, (value) => {
               <span class="ws-tools-count">{{ server.tools.length }} 个工具</span>
             </div>
             <span v-if="server.error" class="ws-badge bad">连接失败</span>
+            <span class="ws-server-remove" role="button" tabindex="0" title="从 mcp.json 移除"
+                  @click.stop="removeServer(server.name)" @keydown.enter.stop="removeServer(server.name)">移除</span>
           </button>
           <p v-if="server.error" class="ws-server-error">{{ server.error }}</p>
 
@@ -477,6 +530,7 @@ watch(() => props.open, (value) => {
           <div class="ws-result-head">
             <span>{{ detail.name }}</span>
             <span class="ws-hint">{{ detail.path }}</span>
+            <button class="text-button danger" @click="removeSkill(detail.name); detail = null">删除这个技能</button>
           </div>
           <pre>{{ detail.body }}</pre>
         </div>
@@ -486,6 +540,9 @@ watch(() => props.open, (value) => {
 </template>
 
 <style scoped>
+.ws-server-remove { font-size: 11px; color: var(--danger); padding: 1px 6px; border-radius: 5px; cursor: pointer; }
+.ws-server-remove:hover { background: var(--danger-soft); }
+
 .ws-agent-status { margin: 0 0 10px; font-size: 12.5px; color: var(--muted); }
 .ws-steps { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .ws-step { display: flex; gap: 9px; align-items: flex-start; }

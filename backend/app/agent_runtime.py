@@ -207,87 +207,143 @@ def start(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS) -> di
     return advance(run, llm)
 
 
-def advance(run: AgentRun, llm) -> dict:
-    """推进一步：问模型 → 执行或停下。返回当前状态，前端照着渲染。"""
+def _turn(run: AgentRun, llm) -> str:
+    """跑一轮：问模型 → 执行一个动作。返回 continue / done / blocked / failed。
+
+    抽出来是为了让「一次跑完」和「边跑边报」共用同一套判定。
+    两套实现迟早会走偏，而 agent 循环走偏一次就是调错工具。
+    """
     from .llm import parse_json
 
+    run.turn += 1
+    try:
+        raw = llm.complete(run.messages, json_mode=True)
+        decision = parse_json(raw)
+    except Exception as exc:  # noqa: BLE001
+        run.status = "failed"
+        run.answer = f"模型这一步没给出可用结果：{type(exc).__name__}: {exc}"
+        return "failed"
+
+    action = str(decision.get("action") or "").strip()
+    run.steps.append({"turn": run.turn, "kind": action or "unknown",
+                      "detail": str(decision.get("thought") or "")[:200]})
+
+    if action == "final":
+        run.status = "done"
+        run.answer = str(decision.get("answer") or "").strip() or "（模型没有给出回答）"
+        return "done"
+
+    if action == "skill_list":
+        from . import skills as skill_store
+
+        lines = [f"{s['name']}: {s['description']}" for s in skill_store.list_skills()]
+        _observe(run, "技能清单", "\n".join(lines) or "没有技能")
+        return "continue"
+
+    if action == "skill_use":
+        name = str(decision.get("name") or "").strip()
+        try:
+            from . import skills as skill_store
+
+            skill = skill_store.load_skill(name)
+            _observe(run, f"技能 {name}", skill.get("body", "")[:MAX_OBSERVATION])
+        except KeyError:
+            _observe(run, f"技能 {name}", "没有这个技能")
+        return "continue"
+
+    if action == "tool":
+        tool_name = str(decision.get("tool") or "").strip()
+        args = decision.get("args") or {}
+        if not isinstance(args, dict):
+            _observe(run, tool_name, "args 必须是对象")
+            return "continue"
+
+        catalog = tool_catalog(probe=True)
+        verdict = _assess(tool_name, catalog)
+        # reason 也要留痕：界面要能回答"为什么这一步被拒了"
+        run.steps[-1].update({"tool": tool_name, "args": _mask(args),
+                              "risk": verdict["risk"], "decision": verdict["decision"],
+                              "reason": verdict.get("reason", "")})
+
+        if verdict["decision"] == DENY:
+            _observe(run, tool_name, f"被拒绝：{verdict['reason']}")
+            return "continue"
+        if verdict["decision"] == ASK:
+            run.status = "blocked"
+            run.pending = {"tool": tool_name, "args": args,
+                           "risk": verdict["risk"], "reason": verdict["reason"]}
+            return "blocked"
+
+        result = call_tool(tool_name, args)
+        run.steps[-1].update({"ok": result["ok"], "output": result["text"][:400]})
+        _observe(run, tool_name, result["text"])
+        return "continue"
+
+    # 模型没按协议来：把规则再说一遍，让它下一轮改
+    _observe(run, "协议", f'无法识别的 action：{action or "(空)"}。只能输出 skill_list / skill_use / tool / final。')
+    return "continue"
+
+
+def _close_out(run: AgentRun) -> None:
+    """轮数用完还没结论时，给一句诚实的话，别装作完成了。"""
+    if run.status == "running":
+        run.status = "done"
+        run.answer = run.answer or f"已经走了 {run.max_turns} 步还没得出结论。要接着做，把问题问得更具体一点。"
+
+
+def advance(run: AgentRun, llm) -> dict:
+    """一次跑到底：问模型 → 执行或停下。返回当前状态。"""
     if not getattr(llm, "configured", False):
         run.status = "failed"
         run.answer = "还没有配置模型，先到右上角「模型配置」填一个。"
         return run.public()
 
     while run.status == "running" and run.turn < run.max_turns:
-        run.turn += 1
-        try:
-            raw = llm.complete(run.messages, json_mode=True)
-            decision = parse_json(raw)
-        except Exception as exc:  # noqa: BLE001
-            run.status = "failed"
-            run.answer = f"模型这一步没给出可用结果：{type(exc).__name__}: {exc}"
+        outcome = _turn(run, llm)
+        if outcome in ("done", "blocked", "failed"):
             return run.public()
 
-        action = str(decision.get("action") or "").strip()
-        run.steps.append({"turn": run.turn, "kind": action or "unknown",
-                          "detail": str(decision.get("thought") or "")[:200]})
-
-        if action == "final":
-            run.status = "done"
-            run.answer = str(decision.get("answer") or "").strip() or "（模型没有给出回答）"
-            return run.public()
-
-        if action == "skill_list":
-            from . import skills as skill_store
-
-            lines = [f"{s['name']}: {s['description']}" for s in skill_store.list_skills()]
-            _observe(run, "技能清单", "\n".join(lines) or "没有技能")
-            continue
-
-        if action == "skill_use":
-            name = str(decision.get("name") or "").strip()
-            try:
-                from . import skills as skill_store
-
-                skill = skill_store.load_skill(name)
-                _observe(run, f"技能 {name}", skill.get("body", "")[:MAX_OBSERVATION])
-            except KeyError:
-                _observe(run, f"技能 {name}", "没有这个技能")
-            continue
-
-        if action == "tool":
-            tool_name = str(decision.get("tool") or "").strip()
-            args = decision.get("args") or {}
-            if not isinstance(args, dict):
-                _observe(run, tool_name, "args 必须是对象")
-                continue
-
-            catalog = tool_catalog(probe=True)
-            verdict = _assess(tool_name, catalog)
-            # reason 也要留痕：界面要能回答"为什么这一步被拒了"
-            run.steps[-1].update({"tool": tool_name, "args": _mask(args),
-                                  "risk": verdict["risk"], "decision": verdict["decision"],
-                                  "reason": verdict.get("reason", "")})
-
-            if verdict["decision"] == DENY:
-                _observe(run, tool_name, f"被拒绝：{verdict['reason']}")
-                continue
-            if verdict["decision"] == ASK:
-                run.status = "blocked"
-                run.pending = {"tool": tool_name, "args": args,
-                               "risk": verdict["risk"], "reason": verdict["reason"]}
-                return run.public()
-
-            result = call_tool(tool_name, args)
-            run.steps[-1].update({"ok": result["ok"], "output": result["text"][:400]})
-            _observe(run, tool_name, result["text"])
-            continue
-
-        # 模型没按协议来：把规则再说一遍，让它下一轮改
-        _observe(run, "协议", f'无法识别的 action：{action or "(空)"}。只能输出 skill_list / skill_use / tool / final。')
-
-    if run.status == "running":
-        run.status = "done"
-        run.answer = run.answer or f"已经走了 {run.max_turns} 步还没得出结论。要接着做，把问题问得更具体一点。"
+    _close_out(run)
     return run.public()
+
+
+def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS):
+    """边跑边报：每一步结束就吐一个事件。
+
+    同步跑 4 轮要 85 秒，界面只能转圈。流式之后用户能看到它先查了什么、
+    为什么换了个工具——这比最后那句回答更能建立信任。
+    """
+    _gc()
+    run = AgentRun(goal, course_id, max_turns)
+    run.messages = [
+        {"role": "system", "content": _system_prompt()},
+        {"role": "user", "content": goal},
+    ]
+    _runs[run.id] = run
+    yield {"type": "run", "run_id": run.id, "max_turns": run.max_turns}
+
+    if not getattr(llm, "configured", False):
+        run.status = "failed"
+        run.answer = "还没有配置模型，先到右上角「模型配置」填一个。"
+        yield {"type": "error", "message": run.answer}
+        return
+
+    while run.status == "running" and run.turn < run.max_turns:
+        outcome = _turn(run, llm)
+        if run.steps:
+            yield {"type": "step", "step": run.steps[-1]}
+        if outcome == "blocked":
+            yield {"type": "blocked", "pending": run.pending}
+            return
+        if outcome == "failed":
+            yield {"type": "error", "message": run.answer}
+            return
+        if outcome == "done":
+            yield {"type": "final", "answer": run.answer}
+            return
+
+    _close_out(run)
+    yield {"type": "final", "answer": run.answer}
 
 
 def _mask(args: dict) -> dict:

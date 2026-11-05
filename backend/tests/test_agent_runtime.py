@@ -154,3 +154,59 @@ def test_unconfigured_model_fails_with_a_readable_message():
     result = agent_runtime.start(Cold(), "随便")
     assert result["status"] == "failed"
     assert "模型配置" in result["answer"]
+
+
+def test_stream_emits_events_as_it_goes(fake_tools):
+    """流式要有"过程"，不只是把最终结果一次性吐出来。
+
+    顺序固定：run → step* → final → （调用方补 end）。
+    少一个 run 事件，前端就不知道 run_id，后续没法 resume。
+    """
+    llm = FakeLLM([
+        {"action": "tool", "tool": "demo.read", "args": {}},
+        {"action": "final", "answer": "查完了"},
+    ])
+    events = list(agent_runtime.stream(llm, "查一下"))
+    kinds = [e["type"] for e in events]
+    assert kinds[0] == "run"
+    assert kinds.count("step") == 2, f"应该有两轮步骤，实际 {kinds}"
+    assert kinds[-1] == "final"
+    assert events[0].get("run_id")
+
+
+def test_stream_stops_on_blocked_with_pending(fake_tools):
+    """需要确认时流也不能一直吐，要停下来并把 pending 交给前端。"""
+    llm = FakeLLM([
+        {"action": "tool", "tool": "demo.drop", "args": {"id": "1"}},
+        {"action": "final", "answer": "不该走到这里"},
+    ])
+    events = list(agent_runtime.stream(llm, "删掉它"))
+    kinds = [e["type"] for e in events]
+    assert "blocked" in kinds
+    assert kinds[-1] == "blocked"
+    blocked = next(e for e in events if e["type"] == "blocked")
+    assert blocked["pending"]["tool"] == "demo.drop"
+    assert fake_tools == []
+
+
+def test_stream_reports_model_failure_as_an_event():
+    """模型挂了也要让前端收到一条能显示的消息，而不是卡住等超时。"""
+
+    class Broken:
+        configured = True
+
+        def complete(self, messages, json_mode=False):
+            raise RuntimeError("网关 500")
+
+    events = list(agent_runtime.stream(Broken(), "随便"))
+    kinds = [e["type"] for e in events]
+    assert kinds[-1] == "error"
+    assert "网关 500" in events[-1]["message"]
+
+
+def test_stream_without_model_emits_error_once():
+    class Cold:
+        configured = False
+
+    events = list(agent_runtime.stream(Cold(), "随便"))
+    assert [e["type"] for e in events] == ["run", "error"]

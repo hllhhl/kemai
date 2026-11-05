@@ -266,6 +266,34 @@ def register_workspace_routes(app, services) -> None:
         """
         return agent_runtime.start(services.llm, payload.goal, payload.course_id, payload.max_turns)
 
+    @app.post("/agent/stream")
+    def agent_stream(payload: AgentStartInput):
+        """流式版：每一步结束就推一行 SSE。
+
+        同步那版 4 轮要 85 秒，界面只能转圈。这条路径让用户看到
+        "它先查了什么、为什么换了工具"——过程本身就是可核对性的一部分。
+        """
+        from fastapi.responses import StreamingResponse
+
+        def events():
+            def pack(event: dict) -> str:
+                # SSE 要求每个事件以空行结束，用显式换行拼，别依赖 f-string 里的转义
+                return "data: " + json.dumps(event, ensure_ascii=False) + chr(10) + chr(10)
+
+            try:
+                for event in agent_runtime.stream(services.llm, payload.goal, payload.course_id, payload.max_turns):
+                    yield pack(event)
+            except Exception as exc:  # noqa: BLE001 - 出错也要让前端收到一条可读的消息
+                logger.exception("agent 流式中断")
+                yield pack({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+            yield pack({"type": "end"})
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     @app.post("/agent/resume")
     def agent_resume(payload: AgentResumeInput):
         """用户点了「允许」或「拒绝」，接着跑。"""
