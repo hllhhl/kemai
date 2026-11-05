@@ -278,3 +278,76 @@ def test_stream_generates_a_conversation_id_when_missing(fake_tools):
     run_event = next(e for e in events if e["type"] == "run")
     assert run_event["conversation_id"], "没有生成 conversation_id"
     assert agent_runtime.get_run(run_event["run_id"]).conversation_id == run_event["conversation_id"]
+
+
+# ── 上下文压缩（照 nanoMuse 的 fit_context）─────────────
+
+
+def test_context_keeps_head_and_tail_when_shortening():
+    """工具输出的结论和错误都在尾巴上，缩短时必须留尾。"""
+    text = "[工具结果：x]\n" + "开头" * 2000 + "Listed 16 of 16 groups"
+    shortened = agent_runtime._shorten(text, 400)
+    assert len(shortened) < 600
+    assert "Listed 16 of 16" in shortened, "尾巴被砍掉了"
+    assert "已按上下文预算缩短" in shortened
+
+
+def test_observation_shrinks_before_anything_is_dropped(fake_tools, monkeypatch):
+    """先压缩工具输出，不要一上来就整条删——删了模型就"忘了"查过什么。"""
+    monkeypatch.setattr(agent_runtime, "call_tool",
+                        lambda tool, args, timeout=60.0: {"ok": True, "text": "字" * 6000})
+    llm = FakeLLM([
+        {"action": "tool", "tool": "demo.read", "args": {}},
+        {"action": "tool", "tool": "demo.read", "args": {"i": 2}},
+        {"action": "final", "answer": "好了"},
+    ])
+    run = agent_runtime.AgentRun("读两次", "c1")
+    run.messages = [{"role": "system", "content": "系统提示"}, {"role": "user", "content": "读两次"}]
+    run.status = "running"
+    run.max_turns = 3
+    while run.status == "running" and run.turn < run.max_turns:
+        agent_runtime._turn(run, llm)
+
+    observations = [m for m in run.messages if agent_runtime._is_observation(m)]
+    assert len(observations) == 2, "两条观察都该在，只是被缩短"
+    total = sum(len(str(m["content"])) for m in run.messages)
+    assert total <= agent_runtime.CONTEXT_BUDGET + 2000
+
+
+def test_system_and_user_text_are_never_shortened(fake_tools, monkeypatch):
+    monkeypatch.setattr(agent_runtime, "call_tool",
+                        lambda tool, args, timeout=60.0: {"ok": True, "text": "长" * 20000})
+    llm = FakeLLM([
+        {"action": "tool", "tool": "demo.read", "args": {}},
+        {"action": "final", "answer": "好"},
+    ])
+    long_system = "系统提示" * 500
+    run = agent_runtime.AgentRun("问题", "c1")
+    run.messages = [{"role": "system", "content": long_system}, {"role": "user", "content": "用户原话"}]
+    run.max_turns = 3
+    while run.status == "running" and run.turn < run.max_turns:
+        agent_runtime._turn(run, llm)
+    assert run.messages[0]["content"] == long_system, "系统提示被改了"
+    assert any(m["content"] == "用户原话" for m in run.messages), "用户原话被改了"
+
+
+# ── 重复失败保护 ─────────────────────────────────────────
+
+
+def test_same_failing_call_is_blocked_after_two(fake_tools, monkeypatch):
+    calls = []
+
+    def failing(tool, args, timeout=60.0):
+        calls.append(tool)
+        return {"ok": False, "text": "连接超时"}
+
+    monkeypatch.setattr(agent_runtime, "call_tool", failing)
+    llm = FakeLLM([{"action": "tool", "tool": "demo.read", "args": {"q": "same"}}])
+    run = agent_runtime.AgentRun("一直失败", "c1")
+    run.max_turns = 5
+    while run.status == "running" and run.turn < run.max_turns:
+        agent_runtime._turn(run, llm)
+
+    assert len(calls) == 2, f"应该只真的执行两次，实际 {len(calls)}"
+    told = " ".join(str(m["content"]) for m in run.messages)
+    assert "已经失败两次" in told

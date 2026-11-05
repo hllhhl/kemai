@@ -33,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 MAX_TURNS = 6
 MAX_OBSERVATION = 4000      # 单个工具输出喂回模型的上限（字符）
-MAX_HISTORY = 12            # 保留最近几条观察，防止上下文越滚越大
+MAX_HISTORY = 12            # 兼容旧引用（fit_context 后不再按条数删）
+CONTEXT_BUDGET = 14000      # 消息总字符预算；超了按 fit_context 分级压缩
 
 SYSTEM = """你是一个会用工具的课程助手。每一步只输出一个 JSON 对象，不要输出别的文字。
 
@@ -85,6 +86,8 @@ class AgentRun:
         # 技能可以用 allowed-tools 声明"我只允许用这些工具"，越界要问
         self.active_skill = ""
         self.allowed_tools: list[str] = []
+        # 同一调用连续失败几次：失败两次还重试第三次是纯浪费
+        self.failed_calls: dict[str, int] = {}
         self.turn = 0
         self.created_at = time.time()
 
@@ -384,6 +387,14 @@ def _turn(run: AgentRun, llm) -> str:
                            "risk": verdict["risk"], "reason": verdict["reason"]}
             return "blocked"
 
+        signature = tool_name + "|" + json.dumps(args, ensure_ascii=False, sort_keys=True)
+        if run.failed_calls.get(signature, 0) >= 2:
+            _observe(run, tool_name, "同样的调用已经失败两次了。换一种方式，或者直接告诉用户这一步做不到，不要再重复。")
+            audit.record(tool=tool_name, args=args, decision="allow", ok=False, run_id=run.id,
+                         conversation_id=run.conversation_id, course_id=run.course_id,
+                         error="重复失败已拦截")
+            return "continue"
+
         started = time.time()
         if tool_name.startswith("kemai."):
             result = course_tools.call(tool_name, args, run.course_id)
@@ -397,6 +408,8 @@ def _turn(run: AgentRun, llm) -> str:
             error="" if result["ok"] else result["text"][:200],
             approved_by="user" if run.steps[-1].get("approved") else "",
         )
+        if not result["ok"]:
+            run.failed_calls[signature] = run.failed_calls.get(signature, 0) + 1
         run.steps[-1].update({"ok": result["ok"], "output": result["text"][:400]})
         _observe(run, tool_name, result["text"])
         return "continue"
@@ -519,17 +532,62 @@ def _mask(args: dict) -> dict:
 def _observe(run: AgentRun, source: str, text: str) -> None:
     body = text if len(text) <= MAX_OBSERVATION else text[:MAX_OBSERVATION] + "\n…（输出过长，已截断）"
     run.messages.append({"role": "user", "content": f"[工具结果：{source}]\n{body}"})
-    # 只留最近的观察：历史越长，模型越容易翻旧账而忽略当前状态
-    turn_messages = [m for m in run.messages if m["role"] != "system"]
-    if len(turn_messages) > MAX_HISTORY:
-        drop = len(turn_messages) - MAX_HISTORY
-        kept, removed = [], 0
+    fit_context(run)
+
+
+def _is_observation(message: dict) -> bool:
+    return message.get("role") == "user" and str(message.get("content", "")).startswith("[工具结果：")
+
+
+def _shorten(text: str, limit: int) -> str:
+    """保留头尾、砍中间。
+
+    工具的结论和错误几乎都在尾巴上（"Listed 16 of 16"、"Error: ..."），
+    只留头部等于把最要紧的那句丢掉。
+    """
+    if len(text) <= limit:
+        return text
+    half = max(limit // 2, 40)
+    return text[:half] + "\n…[工具输出已按上下文预算缩短]…\n" + text[-half:]
+
+
+def fit_context(run: AgentRun, budget: int = CONTEXT_BUDGET) -> None:
+    """把消息压到预算内。算法照 nanoMuse 的 fit_context。
+
+    三级，越往后越狠：
+        1. 工具输出按 3000 → 800 → 200 字符逐级缩短（**只动工具输出**，
+           系统提示和用户原话一个字都不改）
+        2. 还超就整条删最旧的观察，但永远保住第一条用户提问
+        3. 再不行就放弃压缩，只记警告
+
+    为什么不按"超过 N 条就从头删"：条数和体积不是一回事。三条 4000 字的
+    工具输出比二十条一句话的观察还大，按条数删要么删太早，要么删不够。
+    """
+    if budget <= 0:
+        return
+
+    def size() -> int:
+        return sum(len(str(m.get("content", ""))) for m in run.messages)
+
+    if size() <= budget:
+        return
+
+    for limit in (3000, 800, 200):
         for message in run.messages:
-            if message["role"] != "system" and removed < drop:
-                removed += 1
-                continue
-            kept.append(message)
-        run.messages = kept
+            if _is_observation(message):
+                message["content"] = _shorten(str(message["content"]), limit)
+        if size() <= budget:
+            logger.info("上下文已压缩到 %d 字符（工具输出限 %d）", size(), limit)
+            return
+
+    while size() > budget:
+        index = next((i for i, m in enumerate(run.messages) if _is_observation(m) and i > 0), None)
+        if index is None:
+            break
+        run.messages.pop(index)
+
+    if size() > budget:
+        logger.warning("上下文仍超预算（%d 字符），不再压缩", size())
 
 
 def resume(llm, run_id: str, approve: bool, note: str = "") -> dict:

@@ -193,3 +193,27 @@ def course(client):
     response = client.post("/courses", json={"name": "RAG 期末复习"})
     assert response.status_code in (200, 201), response.text
     return response.json()
+
+
+@pytest.fixture(autouse=True)
+def isolated_writable_dirs(tmp_path, monkeypatch):
+    """把会写盘的目录指到临时目录。
+
+    没有这层时，跑一次单测就会往真实的 audit/memory 里塞东西——假工具
+    （demo.read）出现在审计日志里，以后排查真问题会被误导。
+    """
+    monkeypatch.setenv("KEMAI_AUDIT_DIR", str(tmp_path / "audit"))
+    monkeypatch.setenv("KEMAI_MEMORY_DIR", str(tmp_path / "memory"))
+    yield
+
+
+@pytest.fixture(autouse=True)
+def isolated_writable_dirs(tmp_path, monkeypatch):
+    """把会写盘的目录指到临时目录。
+
+    没有这层时，跑一次单测就会往真实的 audit/memory 里塞东西——假工具
+    （demo.read）出现在审计日志里，以后排查真问题会被误导。
+    """
+    monkeypatch.setenv("KEMAI_AUDIT_DIR", str(tmp_path / "audit"))
+    monkeypatch.setenv("KEMAI_MEMORY_DIR", str(tmp_path / "memory"))
+    yield
