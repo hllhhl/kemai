@@ -1,41 +1,41 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, API_BASE } from '../api'
+import MarkdownContent from './MarkdownContent.vue'
 
-type Action = {
-  type: string
-  label: string
-  detail: string
-  method: string
-  endpoint: string
-  body: Record<string, unknown>
-  needs_model: boolean
-  ready: boolean
-  blocked_reason: string
-  risk: 'low' | 'moderate' | 'sensitive'
-  risk_note: string
-  decision: 'allow' | 'ask' | 'deny'
-  reason: string
-  overwrites: boolean
+/**
+ * 新建任务 = 一个 Agent 会话。
+ *
+ * 这里不再把一句话翻译成固定动作后逐个调 REST 接口：那个做法只会「一件事
+ * 一件事办」，遇到需要先看资料、再决定下一步的问题就傻住了。现在直接走
+ * /agent/stream，由 Agent 自己挑工具（课程检索、笔记生成、MCP、技能），
+ * 一轮一轮往前推，界面上看得到它每一步在干什么。
+ */
+
+type Step = {
+  turn: number
+  kind: string
+  tool?: string
+  output?: string
+  detail?: string
+  ok?: boolean
 }
-type Plan = {
-  intent: string
-  actions: Action[]
-  hint: string
-  blocked: boolean
-  model_ready: boolean
-  needs_confirm: number
-  denied: number
+type Pending = { tool: string; args: Record<string, unknown>; risk: string; reason: string } | null
+type Run = {
+  id: string
+  status: 'running' | 'done' | 'blocked' | 'failed'
+  answer: string
+  steps: Step[]
+  pending: Pending
+  turn: number
+  max_turns: number
 }
-type Task = {
+type OldTask = {
   id: string
   title: string
   message: string
-  status: 'planned' | 'running' | 'done' | 'failed' | 'cancelled'
-  plan: Plan
-  result: { label: string; state: string; message: string }[]
+  status: string
   created_at: string
-  updated_at: string
 }
 
 const props = defineProps<{ courseId: string; courseName: string; taskId: string }>()
@@ -44,49 +44,90 @@ const emit = defineEmits<{ 'select-task': [id: string]; navigate: [section: stri
 const message = ref('')
 const busy = ref(false)
 const error = ref('')
-const task = ref<Task | null>(null)
-const loading = ref(false)
-// 需要确认的动作必须先勾选：这是"我读过要改什么"，不是走个过场
-const confirmed = ref(false)
-type Verdict = { label: string; type: string; verdict: string; detail: string }
-const verify = ref<{ summary: string; items: Verdict[] } | null>(null)
-const verifying = ref(false)
+const run = ref<Run | null>(null)
+const conversationId = ref('')
+const oldTask = ref<OldTask | null>(null)
+const promptBox = ref<HTMLTextAreaElement | null>(null)
 
-const suggestions = ['把这一章做成笔记', '出 10 道题，难度中等', '这个课件是哪门课的视频']
-
-// 输入框左边的 + ：添附件、挂技能、挂 MCP
+// 输入框左边的 ＋：添附件、挂技能、挂 MCP
 const menuOpen = ref(false)
+const menuWrap = ref<HTMLElement | null>(null)
 const skills = ref<{ name: string; description: string }[]>([])
 const servers = ref<{ name: string; tools: { name: string }[]; error: string }[]>([])
+const menuLoaded = ref(false)
+const menuLoading = ref(false)
 const attached = ref<{ id: string; filename: string }[]>([])
 const uploading = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const exporting = ref('')
 const feedbackMessage = ref('')
 
-async function loadMenuData() {
+let controller: AbortController | null = null
+
+const suggestions = [
+  '把这一章做成复习笔记',
+  '出 10 道题，难度中等',
+  '这个课件对应哪门课的视频',
+  '把这门课的考点按章整理一遍',
+]
+
+const started = computed(() => !!run.value || !!oldTask.value)
+const canSend = computed(() => !!props.courseId && !!message.value.trim() && !busy.value)
+
+/** 点空白处收起菜单：之前只能再点一次加号，弹层盖住输入框，看不見自己打了什么。 */
+function closeMenuOnOutside(event: MouseEvent) {
+  if (!menuOpen.value) return
+  const target = event.target as Node | null
+  if (menuWrap.value && target && menuWrap.value.contains(target)) return
+  menuOpen.value = false
+}
+function closeMenuOnEscape(event: KeyboardEvent) {
+  if (event.key === 'Escape') menuOpen.value = false
+}
+
+onMounted(() => {
+  // mousedown 比 click 早，点其他控件时菜单先收起来，不会吃掉那一次点击
+  document.addEventListener('mousedown', closeMenuOnOutside)
+  document.addEventListener('keydown', closeMenuOnEscape)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('mousedown', closeMenuOnOutside)
+  document.removeEventListener('keydown', closeMenuOnEscape)
+  stop()
+})
+
+async function toggleMenu() {
+  menuOpen.value = !menuOpen.value
+  if (!menuOpen.value || menuLoaded.value || menuLoading.value) return
+  menuLoading.value = true
   try {
-    // probe=false 只读配置，不启动子进程——菜单要秒开
-    const payload = await api<{ mcp: { servers: { name: string; tools: { name: string }[]; error: string }[] }; skills: { name: string; description: string }[] }>(
-      '/workspace/overview?probe=false',
-    )
+    // probe=false 只读配置，不启动 MCP 子进程——菜单要秒开
+    const payload = await api<{
+      mcp: { servers: { name: string; tools: { name: string }[]; error: string }[] }
+      skills: { name: string; description: string }[]
+    }>('/workspace/overview?probe=false')
     skills.value = payload.skills.slice(0, 12)
-    servers.value = payload.mcp.servers.filter((s) => !s.error).slice(0, 6)
+    servers.value = payload.mcp.servers.filter((server) => !server.error).slice(0, 6)
+    menuLoaded.value = true
   } catch {
     skills.value = []
     servers.value = []
+  } finally {
+    menuLoading.value = false
   }
 }
 
 function insertToken(token: string) {
   message.value = message.value ? `${message.value} ${token}` : token
   menuOpen.value = false
+  promptBox.value?.focus()
 }
 
 async function pickFiles(event: Event) {
   const input = event.target as HTMLInputElement
   const files = Array.from(input.files || [])
   input.value = ''
+  menuOpen.value = false
   if (!files.length || !props.courseId) return
   uploading.value = true
   error.value = ''
@@ -115,6 +156,7 @@ async function pickFiles(event: Event) {
 async function exportDoc(kind: 'docx' | 'pptx') {
   if (!props.courseId) return
   exporting.value = kind
+  menuOpen.value = false
   error.value = ''
   try {
     const payload = await api<{ url: string; filename: string }>(
@@ -130,252 +172,212 @@ async function exportDoc(kind: 'docx' | 'pptx') {
   }
 }
 
-const SECTION: Record<string, string> = { notes: 'outline', practice: 'practice', finder: 'finder' }
-const STATUS_TEXT: Record<string, string> = {
-  planned: '待执行', running: '执行中', done: '已完成', failed: '失败', cancelled: '已取消',
+const STEP_LABEL: Record<string, string> = {
+  tool: '调用工具',
+  skill_use: '使用技能',
+  skill_list: '查看技能',
+  final: '给出结论',
 }
-const readable = (action: Action) => action.ready && action.endpoint
-const RISK_TEXT: Record<string, string> = { low: '只读', moderate: '会改东西', sensitive: '不可撤销' }
-const VERDICT_TEXT: Record<string, string> = {
-  verified: '核对通过', pending: '还在跑', contradicted: '对不上', unknown: '查不到',
-}
-const needConfirm = computed(() => (task.value?.plan.actions || []).filter(
-  (a) => a.decision === 'ask' && readable(a),
-))
-const canRun = computed(() => {
-  const current = task.value
-  if (!current || busy.value) return false
-  if (!current.plan.actions.some((a) => readable(a))) return false
-  // 有待确认的动作时，必须显式勾过
-  return needConfirm.value.length === 0 || confirmed.value
-})
 
-async function loadTask(id: string) {
-  loading.value = true
-  error.value = ''
-  try {
-    task.value = await api<Task>(`/tasks/${id}`)
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    loading.value = false
+function stepTitle(step: Step) {
+  if (step.kind === 'tool' && step.tool) return step.tool
+  if (step.kind === 'skill_use' && step.tool) return `技能 · ${step.tool}`
+  return STEP_LABEL[step.kind] || step.kind
+}
+
+/** 工具返回往往几百字，时间线里只留开头，点开由 answer 承载全文 */
+function stepSummary(step: Step) {
+  const text = (step.output || step.detail || '').replace(/\s+/g, ' ').trim()
+  return text.length > 160 ? `${text.slice(0, 160)}…` : text
+}
+
+function handleEvent(event: { type: string; [key: string]: unknown }) {
+  const current = run.value
+  if (!current) return
+  if (event.type === 'run') {
+    current.id = String(event.run_id || '')
+    current.max_turns = Number(event.max_turns || current.max_turns)
+    if (event.conversation_id) conversationId.value = String(event.conversation_id)
+  } else if (event.type === 'step') {
+    const step = event.step as Step
+    current.steps.push(step)
+    current.turn = step.turn
+  } else if (event.type === 'blocked') {
+    current.pending = event.pending as Pending
+    current.status = 'blocked'
+  } else if (event.type === 'final') {
+    current.answer = String(event.answer || '')
+    current.status = 'done'
+  } else if (event.type === 'error') {
+    current.status = 'failed'
+    current.answer = String(event.message || '出错了')
   }
 }
 
-async function create() {
-  if (!props.courseId || !message.value.trim() || busy.value) return
+async function send() {
+  if (!canSend.value) return
+  const goal = message.value.trim()
+  menuOpen.value = false
   busy.value = true
   error.value = ''
-  try {
-    const created = await api<Task>('/tasks', {
-      method: 'POST',
-      body: JSON.stringify({ message: message.value.trim(), course_id: props.courseId }),
-    })
-    task.value = created
-    message.value = ''
-    emit('select-task', created.id)
-    emit('changed')
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    busy.value = false
-  }
-}
-
-async function run() {
-  const current = task.value
-  if (!current || busy.value) return
-  busy.value = true
-  error.value = ''
-  const results: { label: string; state: string; message: string }[] = []
-  try {
-    await api(`/tasks/${current.id}`, { method: 'PATCH', body: JSON.stringify({ status: 'running' }) })
-    for (const action of current.plan.actions) {
-      if (!readable(action)) {
-        results.push({ label: action.label, state: 'skipped', message: action.blocked_reason || '这一步现在做不了' })
-        continue
-      }
-      try {
-        await api(action.endpoint, { method: action.method, body: JSON.stringify(action.body) })
-        const section = SECTION[action.type]
-        results.push({
-          label: action.label,
-          state: 'done',
-          message: section ? `已提交，产物在「${{ outline: '复习笔记', practice: '在线练习', finder: 'PPT 找课' }[section]}」` : '已提交',
-        })
-      } catch (e) {
-        results.push({ label: action.label, state: 'failed', message: e instanceof Error ? e.message : String(e) })
-      }
-    }
-    const anyDone = results.some((item) => item.state === 'done')
-    task.value = await api<Task>(`/tasks/${current.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ status: anyDone ? 'done' : 'failed', result: results }),
-    })
-    // 202 只说明"已受理"。真正算不算做成，查库核对一次再说。
-    if (anyDone) await checkProduct(current.id)
-    emit('changed')
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-    try {
-      task.value = await api<Task>(`/tasks/${current.id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ status: 'failed', result: results }),
-      })
-    } catch {
-      /* 状态回写失败就算了，别把原始错误盖掉 */
-    }
-  } finally {
-    busy.value = false
-  }
-}
-
-async function checkProduct(id: string) {
-  verifying.value = true
-  verify.value = null
-  try {
-    // 生成要时间，给两次机会：先看一眼，20 秒后再看
-    for (const delay of [0, 20000]) {
-      if (delay) await new Promise((r) => setTimeout(r, delay))
-      const payload = await api<{ summary: string; items: Verdict[]; task: Task }>(`/tasks/${id}/verify`, { method: 'POST' })
-      verify.value = { summary: payload.summary, items: payload.items }
-      task.value = payload.task
-      if (payload.summary !== 'pending') break
-    }
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-  } finally {
-    verifying.value = false
-  }
-}
-
-function verifyText(summary: string) {
-  const map: Record<string, string> = {
-    verified: '都对上了', pending: '还在跑', contradicted: '有对不上的',
-    unknown: '有查不到的', nothing: '没有可核对的产物',
-  }
-  return map[summary] || summary
-}
-
-async function remember(scope: 'session' | 'always') {
-  const kinds = [...new Set(needConfirm.value.map((a) => a.type))]
-  try {
-    for (const kind of kinds) {
-      await api('/sentinel/grant', { method: 'POST', body: JSON.stringify({ action_type: kind, scope }) })
-    }
-    confirmed.value = true
-    // 授权后重新问一次，让徽章立刻变
-    if (task.value) await loadTask(task.value.id)
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : String(e)
-  }
-}
-
-function restart() {
-  task.value = null
+  feedbackMessage.value = ''
+  oldTask.value = null
+  // 先放空壳，第一轮模型调用要十几秒，界面不能是死的
+  run.value = { id: '', status: 'running', answer: '', steps: [], pending: null, turn: 0, max_turns: 6 }
   message.value = ''
+  try {
+    controller = new AbortController()
+    const response = await fetch(`${API_BASE}/agent/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal, course_id: props.courseId || '', max_turns: 6, conversation_id: conversationId.value }),
+      signal: controller.signal,
+    })
+    if (!response.ok) throw new Error(`请求失败（${response.status}）`)
+    if (!response.body) throw new Error('浏览器不支持流式响应')
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      // 事件之间空行分隔；末尾可能截断，留在 buffer 等下一段
+      const chunks = buffer.split(String.fromCharCode(10, 10))
+      buffer = chunks.pop() || ''
+      for (const chunk of chunks) {
+        const line = chunk.split(String.fromCharCode(10)).find((item) => item.startsWith('data: '))
+        if (!line) continue
+        try {
+          handleEvent(JSON.parse(line.slice(6)))
+        } catch {
+          /* 半截 JSON，下一段补上 */
+        }
+      }
+    }
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      if (run.value) run.value.status = 'failed'
+    } else {
+      error.value = e instanceof Error ? e.message : String(e)
+      if (run.value) run.value.status = 'failed'
+    }
+  } finally {
+    controller = null
+    busy.value = false
+  }
+}
+
+function stop() {
+  controller?.abort()
+  controller = null
+  busy.value = false
+  if (run.value && run.value.status === 'running') {
+    run.value.status = 'failed'
+    run.value.answer = run.value.answer || '已停止'
+  }
+}
+
+async function resume(approve: boolean) {
+  if (!run.value?.id) return
+  try {
+    await api('/agent/resume', { method: 'POST', body: JSON.stringify({ run_id: run.value.id, approve }) })
+    run.value.pending = null
+    run.value.status = approve ? 'done' : 'failed'
+    if (!approve) run.value.answer = '已取消这一步'
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+/** 从历史任务进来：把那次的原话留在这儿，一键交给 Agent 重跑 */
+async function loadOldTask(id: string) {
+  oldTask.value = null
+  try {
+    oldTask.value = await api<OldTask>(`/tasks/${id}`)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function reuseOldTask() {
+  if (!oldTask.value) return
+  message.value = oldTask.value.message
+  oldTask.value = null
+  emit('select-task', '')
+  promptBox.value?.focus()
+}
+
+function reset() {
+  stop()
+  run.value = null
+  oldTask.value = null
+  conversationId.value = ''
+  message.value = ''
+  error.value = ''
+  feedbackMessage.value = ''
   emit('select-task', '')
 }
 
 watch(() => props.taskId, (id) => {
-  confirmed.value = false
-  verify.value = null
-  if (id) void loadTask(id)
-  else { task.value = null; loading.value = false }
+  if (id) void loadOldTask(id)
+  else oldTask.value = null
 }, { immediate: true })
 </script>
 
 <template>
   <div class="task-page">
-    <!-- 详情 -->
-    <template v-if="task">
+    <!-- 历史任务：保留原样，但可以一句话交给 Agent 重做 -->
+    <template v-if="oldTask">
       <header class="task-head">
         <div>
-          <p class="task-eyebrow">
-            <span :class="['task-status', task.status]">{{ STATUS_TEXT[task.status] }}</span>
-            <span class="task-time">{{ new Date(task.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }}</span>
-          </p>
-          <h2>{{ task.title }}</h2>
-          <p v-if="task.message !== task.title" class="task-quote">「{{ task.message }}」</p>
+          <p class="task-eyebrow"><span class="task-status">{{ oldTask.status }}</span></p>
+          <h2>{{ oldTask.title }}</h2>
+          <p class="task-quote">「{{ oldTask.message }}」</p>
         </div>
-        <button class="button subtle small" @click="restart">新建任务</button>
+        <button class="button subtle small" @click="reset">新建任务</button>
       </header>
-
-      <p v-if="error" class="task-error">{{ error }}</p>
-
-      <div class="task-steps">
-        <article v-for="(action, index) in task.plan.actions" :key="index" class="task-step">
-          <div class="task-step-head">
-            <span class="task-step-index">{{ index + 1 }}</span>
-            <strong>{{ action.label }}</strong>
-            <span :class="['task-chip', 'risk', action.risk]" :title="action.risk_note">{{ RISK_TEXT[action.risk] }}</span>
-            <span v-if="!action.ready" class="task-chip warn">{{ action.blocked_reason }}</span>
-            <span v-else-if="task.result.find((r) => r.label === action.label)" :class="['task-chip', task.result.find((r) => r.label === action.label)!.state]">
-              {{ { done: '已完成', failed: '失败', skipped: '跳过' }[task.result.find((r) => r.label === action.label)!.state] || '' }}
-            </span>
-          </div>
-          <p class="task-step-detail">{{ action.detail }}</p>
-          <p v-if="action.decision === 'ask' && action.ready" class="task-step-ask">{{ action.reason }}</p>
-          <p v-if="task.result.find((r) => r.label === action.label)?.message" class="task-step-msg">
-            {{ task.result.find((r) => r.label === action.label)!.message }}
-          </p>
-          <button
-            v-if="SECTION[action.type] && task.result.find((r) => r.label === action.label)?.state === 'done'"
-            class="text-button"
-            @click="emit('navigate', SECTION[action.type])"
-          >
-            去看「{{ { outline: '复习笔记', practice: '在线练习', finder: 'PPT 找课' }[SECTION[action.type]] }}」
-          </button>
-        </article>
-      </div>
-
-      <p v-if="task.plan.hint" :class="['task-hint', { blocked: task.plan.blocked }]">{{ task.plan.hint }}</p>
-
-      <div v-if="needConfirm.length" class="task-guard" role="group" aria-label="执行前确认">
-        <p class="task-guard-title">这 {{ needConfirm.length }} 步会改动已有内容</p>
-        <ul class="task-guard-list">
-          <li v-for="action in needConfirm" :key="action.label">{{ action.label }} — {{ action.reason }}</li>
-        </ul>
-        <label class="task-guard-check">
-          <input v-model="confirmed" type="checkbox" />
-          <span>我确认按上面的方式执行</span>
-        </label>
-        <div class="task-guard-actions">
-          <button class="text-button" @click="remember('session')">本次不再问</button>
-          <button class="text-button" @click="remember('always')">以后都不问</button>
-        </div>
-      </div>
-
+      <p class="task-hint">这条是旧版「按固定步骤执行」的记录。交给 Agent 重做，它会自己决定查什么、怎么做。</p>
       <div class="task-actions">
-        <button class="button primary" :disabled="busy || !canRun" @click="run">
-          {{ busy ? '执行中…' : task.status === 'done' ? '再执行一次' : needConfirm.length ? `确认并执行 ${needConfirm.length} 步` : '开始执行' }}
-        </button>
-        <button v-if="task.plan.blocked && !task.plan.model_ready" class="text-button" @click="emit('open-models')">去配置模型</button>
-        <span v-if="needConfirm.length && !confirmed" class="task-actions-hint">先勾选上面那一行</span>
-      </div>
-
-      <div v-if="verifying || verify" class="task-verify">
-        <p class="task-verify-title">
-          {{ verifying ? '正在核对产物…' : `核对结果：${verifyText(verify!.summary)}` }}
-        </p>
-        <ul v-if="verify" class="task-verify-list">
-          <li v-for="item in verify.items" :key="item.label" :class="['task-verify-row', item.verdict]">
-            <span class="task-verify-badge">{{ VERDICT_TEXT[item.verdict] || item.verdict }}</span>
-            <span class="task-verify-label">{{ item.label }}</span>
-            <span class="task-verify-detail">{{ item.detail }}</span>
-          </li>
-        </ul>
+        <button class="button primary" @click="reuseOldTask">交给 Agent 重做</button>
       </div>
     </template>
 
-    <!-- 新建 -->
-    <template v-else>
-      <div class="task-new">
-        <h1>要做什么？</h1>
-        <p class="task-new-sub">{{ courseName ? `当前课程：${courseName}` : '先在左下角选一门课程' }}</p>
-        <div class="task-composer">
-          <div class="composer-menu-wrap">
-            <button class="composer-plus" :class="{ open: menuOpen }" aria-label="添加内容" :disabled="!courseId" @click="menuOpen = !menuOpen; menuOpen && loadMenuData()">＋</button>
+    <!-- Agent 会话 -->
+    <template v-else-if="run">
+      <div class="agent-thread">
+        <article v-for="(step, index) in run.steps" :key="index" class="agent-step">
+          <div class="agent-step-head">
+            <span class="task-step-index">{{ step.turn || index + 1 }}</span>
+            <strong>{{ stepTitle(step) }}</strong>
+            <span :class="['task-chip', run.status === 'failed' ? 'failed' : 'done']">{{ run.status === 'running' ? '进行中' : '已结束' }}</span>
+          </div>
+          <p v-if="stepSummary(step)" class="agent-step-body">{{ stepSummary(step) }}</p>
+        </article>
+
+        <p v-if="busy && !run.steps.length" class="agent-waiting">正在读资料、挑工具…</p>
+
+        <section v-if="run.answer" class="agent-answer">
+          <p class="agent-answer-label">{{ run.status === 'failed' ? '没有完成' : '回答' }}</p>
+          <MarkdownContent :content="run.answer" />
+        </section>
+
+        <div v-if="run.pending" class="task-guard">
+          <p class="task-guard-title">这一步会改动内容，需要你点头</p>
+          <p class="agent-step-body">{{ run.pending.tool }} — {{ run.pending.reason }}</p>
+          <div class="task-guard-actions">
+            <button class="button primary small" @click="resume(true)">允许</button>
+            <button class="text-button" @click="resume(false)">不做了</button>
+          </div>
+        </div>
+
+        <p v-if="error" class="task-error">{{ error }}</p>
+
+        <!-- 继续追问：同一个 conversation_id 共享上下文 -->
+        <div class="task-composer agent-composer">
+          <div ref="menuWrap" class="composer-menu-wrap">
+            <button class="composer-plus" :class="{ open: menuOpen }" aria-label="添加内容" :disabled="!courseId" @click="toggleMenu">＋</button>
             <div v-if="menuOpen" class="composer-menu" role="menu">
               <div class="composer-menu-group">
                 <button class="composer-menu-item" role="menuitem" :disabled="uploading" @click="fileInput?.click()">
@@ -383,52 +385,116 @@ watch(() => props.taskId, (id) => {
                 </button>
               </div>
               <div class="composer-menu-group">
-                <p class="composer-menu-title">技能</p>
+                <p class="composer-menu-title">技能 · {{ menuLoading ? '读取中…' : `${skills.length} 个` }}</p>
                 <button v-for="skill in skills" :key="skill.name" class="composer-menu-item" role="menuitem" @click="insertToken(`@skill:${skill.name}`)">
                   <span>{{ skill.name }}</span><small>{{ skill.description.slice(0, 22) }}</small>
                 </button>
-                <p v-if="!skills.length" class="composer-menu-empty">还没有安装技能</p>
+                <p v-if="!menuLoading && !skills.length" class="composer-menu-empty">还没有装技能 · 去「工作区」导入</p>
               </div>
               <div class="composer-menu-group">
-                <p class="composer-menu-title">MCP</p>
+                <p class="composer-menu-title">MCP · {{ menuLoading ? '读取中…' : `${servers.length} 个` }}</p>
                 <button v-for="server in servers" :key="server.name" class="composer-menu-item" role="menuitem" @click="insertToken(`@mcp:${server.name}`)">
                   <span>{{ server.name }}</span><small>{{ server.tools.length }} 个工具</small>
                 </button>
-                <p v-if="!servers.length" class="composer-menu-empty">还没有连上 MCP</p>
+                <p v-if="!menuLoading && !servers.length" class="composer-menu-empty">还没有连上 MCP · 去「工作区」添加</p>
               </div>
               <div class="composer-menu-group">
-                <button class="composer-menu-item" role="menuitem" :disabled="!!exporting" @click="exportDoc('docx'); menuOpen = false">
+                <button class="composer-menu-item" role="menuitem" :disabled="!!exporting" @click="exportDoc('docx')">
                   <span>导出 Word</span><small>{{ exporting === 'docx' ? '生成中…' : '把当前笔记存成 docx' }}</small>
                 </button>
-                <button class="composer-menu-item" role="menuitem" :disabled="!!exporting" @click="exportDoc('pptx'); menuOpen = false">
+                <button class="composer-menu-item" role="menuitem" :disabled="!!exporting" @click="exportDoc('pptx')">
                   <span>导出 PPT</span><small>{{ exporting === 'pptx' ? '生成中…' : '一节一页，要点成行' }}</small>
                 </button>
               </div>
             </div>
           </div>
           <textarea
+            ref="promptBox"
+            v-model="message"
+            rows="2"
+            :disabled="busy"
+            placeholder="继续追问，或让它接着做下一步"
+            @keydown.enter.ctrl.prevent="send"
+            @keydown.enter.meta.prevent="send"
+          ></textarea>
+          <input ref="fileInput" type="file" multiple hidden accept=".pdf,.docx,.pptx,.md,.txt" @change="pickFiles" />
+          <div class="task-composer-foot">
+            <span class="task-tip">{{ busy ? 'Ctrl + Enter 无效，先停止' : 'Ctrl + Enter 发送 · Esc 关闭菜单' }}</span>
+            <div class="agent-composer-actions">
+              <button v-if="busy" class="text-button" @click="stop">停止</button>
+              <button class="button primary small" :disabled="!canSend" @click="send">发送</button>
+            </div>
+          </div>
+        </div>
+
+        <button class="text-button agent-reset" @click="reset">开始新的任务</button>
+      </div>
+    </template>
+
+    <!-- 新建 -->
+    <template v-else>
+      <div class="task-new">
+        <h1>要做什么？</h1>
+        <p class="task-new-sub">
+          {{ courseName ? `当前课程：${courseName} · 它会自己查资料、调工具，把结果交给你` : '先在左下角选一门课程' }}
+        </p>
+        <div class="task-composer">
+          <div ref="menuWrap" class="composer-menu-wrap">
+            <button class="composer-plus" :class="{ open: menuOpen }" aria-label="添加内容" :disabled="!courseId" @click="toggleMenu">＋</button>
+            <div v-if="menuOpen" class="composer-menu" role="menu">
+              <div class="composer-menu-group">
+                <button class="composer-menu-item" role="menuitem" :disabled="uploading" @click="fileInput?.click()">
+                  <span>添加文件</span><small>{{ uploading ? '上传中…' : '课件、Word、PPT、PDF' }}</small>
+                </button>
+              </div>
+              <div class="composer-menu-group">
+                <p class="composer-menu-title">技能 · {{ menuLoading ? '读取中…' : `${skills.length} 个` }}</p>
+                <button v-for="skill in skills" :key="skill.name" class="composer-menu-item" role="menuitem" @click="insertToken(`@skill:${skill.name}`)">
+                  <span>{{ skill.name }}</span><small>{{ skill.description.slice(0, 22) }}</small>
+                </button>
+                <p v-if="!menuLoading && !skills.length" class="composer-menu-empty">还没有装技能 · 去「工作区」导入</p>
+              </div>
+              <div class="composer-menu-group">
+                <p class="composer-menu-title">MCP · {{ menuLoading ? '读取中…' : `${servers.length} 个` }}</p>
+                <button v-for="server in servers" :key="server.name" class="composer-menu-item" role="menuitem" @click="insertToken(`@mcp:${server.name}`)">
+                  <span>{{ server.name }}</span><small>{{ server.tools.length }} 个工具</small>
+                </button>
+                <p v-if="!menuLoading && !servers.length" class="composer-menu-empty">还没有连上 MCP · 去「工作区」添加</p>
+              </div>
+              <div class="composer-menu-group">
+                <button class="composer-menu-item" role="menuitem" :disabled="!!exporting" @click="exportDoc('docx')">
+                  <span>导出 Word</span><small>{{ exporting === 'docx' ? '生成中…' : '把当前笔记存成 docx' }}</small>
+                </button>
+                <button class="composer-menu-item" role="menuitem" :disabled="!!exporting" @click="exportDoc('pptx')">
+                  <span>导出 PPT</span><small>{{ exporting === 'pptx' ? '生成中…' : '一节一页，要点成行' }}</small>
+                </button>
+              </div>
+            </div>
+          </div>
+          <textarea
+            ref="promptBox"
             v-model="message"
             rows="3"
             :disabled="busy || !courseId"
-            placeholder="把第三章做成笔记，再出 10 道题"
-            @keydown.enter.ctrl.prevent="create"
-            @keydown.enter.meta.prevent="create"
+            placeholder="把第三章做成笔记，再出 10 道题；或者问我这份课件讲了什么"
+            @keydown.enter.ctrl.prevent="send"
+            @keydown.enter.meta.prevent="send"
           ></textarea>
           <div v-if="attached.length" class="composer-attached">
             <span v-for="item in attached" :key="item.id" class="composer-chip">{{ item.filename }}</span>
           </div>
           <input ref="fileInput" type="file" multiple hidden accept=".pdf,.docx,.pptx,.md,.txt" @change="pickFiles" />
           <div class="task-composer-foot">
-            <span class="task-tip">Ctrl + Enter 发送</span>
-            <button class="button primary small" :disabled="!courseId || !message.trim() || busy" @click="create">
-              {{ busy ? '解析中…' : '开始' }}
+            <span class="task-tip">Ctrl + Enter 发送 · Esc 关闭菜单</span>
+            <button class="button primary small" :disabled="!canSend" @click="send">
+              {{ busy ? '执行中…' : '交给 Agent' }}
             </button>
           </div>
         </div>
         <div class="task-suggestions">
           <button v-for="item in suggestions" :key="item" class="task-suggestion" @click="message = item">{{ item }}</button>
         </div>
-        <p v-if="loading" class="muted small">正在读取任务…</p>
+        <p v-if="feedbackMessage" class="task-hint">{{ feedbackMessage }}</p>
         <p v-if="error" class="task-error">{{ error }}</p>
       </div>
     </template>
@@ -436,33 +502,6 @@ watch(() => props.taskId, (id) => {
 </template>
 
 <style scoped>
-.composer-menu-wrap { position: absolute; top: 10px; left: 10px; z-index: 5; }
-.composer-plus {
-  width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--line);
-  background: var(--surface); color: var(--muted); font-size: 16px; line-height: 1;
-  cursor: pointer; display: flex; align-items: center; justify-content: center;
-}
-.composer-plus:hover, .composer-plus.open { border-color: var(--accent); color: var(--accent); background: var(--soft); }
-.composer-menu {
-  position: absolute; top: 34px; left: 0; width: 268px; max-height: 380px; overflow-y: auto;
-  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
-  box-shadow: 0 12px 32px rgba(24, 34, 54, .14); padding: 6px; text-align: left;
-}
-.composer-menu-group { padding: 4px 0; border-bottom: 1px solid var(--line); }
-.composer-menu-group:last-child { border-bottom: 0; }
-.composer-menu-title { margin: 6px 8px 3px; font-size: 10.5px; letter-spacing: .04em; color: var(--muted); }
-.composer-menu-item {
-  display: flex; flex-direction: column; gap: 1px; width: 100%; border: 0; background: transparent;
-  border-radius: 7px; padding: 6px 9px; cursor: pointer; text-align: left; font-family: inherit;
-}
-.composer-menu-item:hover { background: var(--soft); }
-.composer-menu-item:disabled { opacity: .55; cursor: not-allowed; }
-.composer-menu-item span { font-size: 12.5px; color: var(--ink); }
-.composer-menu-item small { font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.composer-menu-empty { margin: 4px 9px 6px; font-size: 11px; color: var(--muted); }
-.composer-attached { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 8px 46px; }
-.composer-chip { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--soft); color: var(--accent-dark); }
-
 .composer-menu-wrap { position: absolute; top: 10px; left: 10px; z-index: 5; }
 .composer-plus {
   width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--line);
@@ -504,74 +543,28 @@ watch(() => props.taskId, (id) => {
 .task-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--line); }
 .task-eyebrow { display: flex; align-items: center; gap: 10px; margin: 0 0 8px; }
 .task-status { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: var(--soft); color: var(--accent-dark); }
-.task-status.done { background: var(--success-soft); color: var(--success); }
-.task-status.failed { background: var(--danger-soft); color: var(--danger); }
-.task-status.running { background: var(--warning-soft); color: var(--warning); }
-.task-time { font-size: 11.5px; color: var(--muted); }
 .task-head h2 { margin: 0; font-size: 18px; font-weight: 600; line-height: 1.5; }
 .task-quote { margin: 6px 0 0; font-size: 12.5px; color: var(--muted); }
-.task-steps { display: flex; flex-direction: column; gap: 12px; margin: 18px 0; }
-.task-step { border: 1px solid var(--line); border-radius: 12px; padding: 13px 15px; background: var(--surface); }
-.task-step-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
-.task-step-index { width: 20px; height: 20px; border-radius: 50%; background: var(--soft); color: var(--accent-dark); font-size: 11px; display: flex; align-items: center; justify-content: center; flex: none; }
-.task-step-head strong { font-size: 13.5px; }
-.task-step-detail { margin: 6px 0 0 29px; font-size: 12px; color: var(--muted); line-height: 1.6; }
-.task-step-msg { margin: 6px 0 0 29px; font-size: 12px; color: var(--ink); }
 .task-chip { font-size: 10.5px; padding: 1px 7px; border-radius: 9px; background: var(--soft); color: var(--accent-dark); }
 .task-chip.done { background: var(--success-soft); color: var(--success); }
 .task-chip.failed { background: var(--danger-soft); color: var(--danger); }
-.task-chip.warn { background: var(--warning-soft); color: var(--warning); }
-.task-hint { margin: 0 0 16px; font-size: 12.5px; color: var(--muted); }
-.task-hint.blocked { color: var(--warning); }
+.task-hint { margin: 12px 0 16px; font-size: 12.5px; color: var(--muted); }
 .task-actions { display: flex; align-items: center; gap: 12px; }
 .task-error { margin: 10px 0; font-size: 12.5px; color: var(--danger); }
-.task-step .text-button { margin: 6px 0 0 29px; }
-</style>
 
-<style scoped>
-.task-chip.risk { background: var(--surface-alt); color: var(--muted); }
-.task-chip.risk.moderate { background: var(--warning-soft); color: var(--warning); }
-.task-chip.risk.sensitive { background: var(--danger-soft); color: var(--danger); }
-.task-step-ask { margin: 6px 0 0 29px; font-size: 12px; color: var(--warning); }
-.task-guard { margin: 0 0 14px; padding: 13px 15px; border: 1px solid var(--warning-soft); border-left: 3px solid var(--warning); border-radius: 10px; background: var(--surface); }
+.agent-thread { display: flex; flex-direction: column; gap: 12px; }
+.agent-step { border: 1px solid var(--line); border-radius: 12px; padding: 11px 14px; background: var(--surface); }
+.agent-step-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.agent-step-head strong { font-size: 13px; }
+.task-step-index { width: 20px; height: 20px; border-radius: 50%; background: var(--soft); color: var(--accent-dark); font-size: 11px; display: flex; align-items: center; justify-content: center; flex: none; }
+.agent-step-body { margin: 6px 0 0 29px; font-size: 12px; color: var(--muted); line-height: 1.65; }
+.agent-waiting { margin: 4px 0; font-size: 12.5px; color: var(--muted); }
+.agent-answer { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; background: var(--surface); }
+.agent-answer-label { margin: 0 0 8px; font-size: 11px; letter-spacing: .04em; color: var(--muted); }
+.agent-composer { margin-top: 4px; }
+.agent-composer-actions { display: flex; align-items: center; gap: 12px; }
+.agent-reset { align-self: flex-start; margin-top: 2px; }
+.task-guard { margin: 4px 0; padding: 13px 15px; border: 1px solid var(--warning-soft); border-left: 3px solid var(--warning); border-radius: 10px; background: var(--surface); }
 .task-guard-title { margin: 0 0 7px; font-size: 13px; font-weight: 600; color: var(--ink); }
-.task-guard-list { margin: 0 0 10px; padding-left: 18px; font-size: 12.5px; color: var(--muted); line-height: 1.7; }
-.task-guard-check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink); cursor: pointer; }
-.task-guard-check input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
-.task-guard-actions { display: flex; gap: 14px; margin-top: 8px; }
-.task-actions-hint { font-size: 12px; color: var(--muted); }
-.task-verify { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
-.task-verify-title { margin: 0 0 8px; font-size: 12.5px; font-weight: 600; color: var(--ink); }
-.task-verify-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
-.task-verify-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted); }
-.task-verify-badge { flex: none; padding: 1px 7px; border-radius: 9px; font-size: 10.5px; background: var(--surface-alt); color: var(--muted); }
-.task-verify-row.verified .task-verify-badge { background: var(--success-soft); color: var(--success); }
-.task-verify-row.contradicted .task-verify-badge { background: var(--danger-soft); color: var(--danger); }
-.task-verify-row.pending .task-verify-badge { background: var(--warning-soft); color: var(--warning); }
-.task-verify-label { color: var(--ink); flex: none; }
-.task-verify-detail { flex: 1; min-width: 0; }
-</style>
-
-<style scoped>
-.task-chip.risk { background: var(--surface-alt); color: var(--muted); }
-.task-chip.risk.moderate { background: var(--warning-soft); color: var(--warning); }
-.task-chip.risk.sensitive { background: var(--danger-soft); color: var(--danger); }
-.task-step-ask { margin: 6px 0 0 29px; font-size: 12px; color: var(--warning); }
-.task-guard { margin: 0 0 14px; padding: 13px 15px; border: 1px solid var(--warning-soft); border-left: 3px solid var(--warning); border-radius: 10px; background: var(--surface); }
-.task-guard-title { margin: 0 0 7px; font-size: 13px; font-weight: 600; color: var(--ink); }
-.task-guard-list { margin: 0 0 10px; padding-left: 18px; font-size: 12.5px; color: var(--muted); line-height: 1.7; }
-.task-guard-check { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink); cursor: pointer; }
-.task-guard-check input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
-.task-guard-actions { display: flex; gap: 14px; margin-top: 8px; }
-.task-actions-hint { font-size: 12px; color: var(--muted); }
-.task-verify { margin-top: 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
-.task-verify-title { margin: 0 0 8px; font-size: 12.5px; font-weight: 600; color: var(--ink); }
-.task-verify-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
-.task-verify-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--muted); }
-.task-verify-badge { flex: none; padding: 1px 7px; border-radius: 9px; font-size: 10.5px; background: var(--surface-alt); color: var(--muted); }
-.task-verify-row.verified .task-verify-badge { background: var(--success-soft); color: var(--success); }
-.task-verify-row.contradicted .task-verify-badge { background: var(--danger-soft); color: var(--danger); }
-.task-verify-row.pending .task-verify-badge { background: var(--warning-soft); color: var(--warning); }
-.task-verify-label { color: var(--ink); flex: none; }
-.task-verify-detail { flex: 1; min-width: 0; }
+.task-guard-actions { display: flex; gap: 12px; margin-top: 10px; }
 </style>

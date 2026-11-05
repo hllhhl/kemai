@@ -117,12 +117,46 @@ def test_unknown_tool_is_refused_not_executed(fake_tools):
 
 
 def test_max_turns_caps_the_loop(fake_tools):
-    """模型永远不肯收尾时，必须在轮数上限停住，而不是一直烧额度。"""
-    llm = FakeLLM([{"action": "tool", "tool": "demo.read", "args": {}}])
+    """模型永远不肯收尾时，必须在轮数上限停住，而不是一直烧额度。
+
+    每次换一个参数，免得先被循环守卫拦下——这一条要单独验证轮数上限本身。
+    """
+    llm = FakeLLM([{"action": "tool", "tool": "demo.read", "args": {"i": index}}
+                   for index in range(10)])
     result = agent_runtime.start(llm, "无限查", max_turns=3)
     assert result["turn"] == 3
     assert result["status"] == "done"
     assert len(fake_tools) == 3
+
+
+def test_repeating_the_exact_same_call_is_halted(fake_tools):
+    """同一份结果查两遍没意义，第三次必须拦下，否则白烧一轮模型。
+
+    这里和 test_max_turns_caps_the_loop 是两条独立的刹车：那条测轮数，
+    这条测循环守卫。
+    """
+    llm = FakeLLM([{"action": "tool", "tool": "demo.read", "args": {"q": "same"}}])
+    run = agent_runtime.AgentRun("反复查同一个东西", "c1")
+    run.max_turns = 5
+    while run.status == "running" and run.turn < run.max_turns:
+        agent_runtime._turn(run, llm)
+
+    assert len(fake_tools) == 2, f"第三次应被拦下，实际执行 {len(fake_tools)} 次"
+    told = " ".join(str(message["content"]) for message in run.messages)
+    assert "别再重复" in told
+
+
+def test_switching_tools_is_not_treated_as_a_loop(fake_tools):
+    """换个工具是正常推进，不能被守卫误判。"""
+    llm = FakeLLM([
+        {"action": "tool", "tool": "demo.read", "args": {"q": "a"}},
+        {"action": "tool", "tool": "demo.read", "args": {"q": "b"}},
+        {"action": "final", "answer": "做完了"},
+    ])
+    result = agent_runtime.start(llm, "换着参数查", max_turns=4)
+
+    assert len(fake_tools) == 2
+    assert result["status"] == "done"
 
 
 def test_protocol_violation_is_told_back_not_crashed(fake_tools):

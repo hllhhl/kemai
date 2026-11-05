@@ -88,6 +88,11 @@ class AgentRun:
         self.allowed_tools: list[str] = []
         # 同一调用连续失败几次：失败两次还重试第三次是纯浪费
         self.failed_calls: dict[str, int] = {}
+        # 循环守卫：照 open-cowork 的 loop-guard 做的两层检测。
+        # 失败次数拦不住"成功了但没进展"——同一份课程简介查两遍就是这种情况。
+        self.call_streak: dict[str, int] = {}      # 完全相同调用的连续次数
+        self.tool_totals: dict[str, int] = {}      # 单个工具在本轮里的累计次数
+        self.last_signature = ""
         self.turn = 0
         self.created_at = time.time()
 
@@ -267,6 +272,43 @@ def _assess(tool_name: str, catalog: list[dict]) -> dict:
     return {**verdict, "read_only": entry["read_only"]}
 
 
+# ── 循环守卫 ─────────────────────────────────────────────
+#
+# 照 open-cowork 的 loop-guard 做的两层检测。那边一轮能连发十几个工具，
+# 阈值是 3/5/8；课脉一轮只做一个动作，同样的调用第 2 次出现就已经说明模型
+# 在原地打转了，所以这里收紧到 2/3。第二层管"同一工具换着参数反复用"，
+# 防的是一次查十个文件那种慢死循环。
+STREAK_WARN = 2
+STREAK_HALT = 3
+TOOL_WARN = 6
+TOOL_HALT = 10
+
+
+def note_call(run: "AgentRun", tool_name: str, signature: str) -> str:
+    """记一次模型请求的调用，返回 \"\" / \"warn\" / \"halt\"。
+
+    先记账再判定：被守卫拦下的调用也要算进去，否则计数永远停在阈值前，
+    warn 会无限重复而升不到 halt。``run`` 只要求有那三个计数器字段，
+    方便单测传假对象。
+    """
+    if run.last_signature == signature:
+        streak = run.call_streak.get(signature, 0) + 1
+    else:
+        # 换了动作，之前的连续计数作废——A/B/A/B 不是死循环
+        run.call_streak = {}
+        streak = 1
+    run.call_streak[signature] = streak
+    run.last_signature = signature
+    total = run.tool_totals.get(tool_name, 0) + 1
+    run.tool_totals[tool_name] = total
+
+    if streak >= STREAK_HALT or total >= TOOL_HALT:
+        return "halt"
+    if streak >= STREAK_WARN or total >= TOOL_WARN:
+        return "warn"
+    return ""
+
+
 def call_tool(tool_name: str, args: dict, timeout: float = 60.0) -> dict:
     """实际执行。工具名是 ``server.tool``，但服务器名里可能带点，所以按最后一个点切。"""
     if "." not in tool_name:
@@ -394,6 +436,23 @@ def _turn(run: AgentRun, llm) -> str:
                          conversation_id=run.conversation_id, course_id=run.course_id,
                          error="重复失败已拦截")
             return "continue"
+
+        # 失败计数管不到"成功了但没进展"。查两遍同一份课程简介，第二次纯属浪费一轮模型调用。
+        guard = note_call(run, tool_name, signature)
+        if guard == "halt":
+            _observe(run, tool_name,
+                     "这个调用已经重复多次，停手。用已经拿到的信息直接回答用户，不要再调工具。")
+            audit.record(tool=tool_name, args=args, decision="allow", ok=False, run_id=run.id,
+                         conversation_id=run.conversation_id, course_id=run.course_id,
+                         error="循环守卫：重复调用已拦下")
+            return "continue"
+        if guard == "warn":
+            # 只提示不拦：第二次常常是换了说法的重试，拦掉可能丢掉本来拿得到的结果
+            _observe(run, tool_name,
+                     f"{tool_name} 刚刚调用过，结果就在上面的上下文里。这次若没有新的理由，就别再重复。")
+            audit.record(tool=tool_name, args=args, decision="allow", ok=False, run_id=run.id,
+                         conversation_id=run.conversation_id, course_id=run.course_id,
+                         error="循环守卫：重复调用已提示")
 
         started = time.time()
         if tool_name.startswith("kemai."):
