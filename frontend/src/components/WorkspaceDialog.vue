@@ -121,6 +121,8 @@ const agentGoal = ref('')
 const agentRun = ref<AgentRun | null>(null)
 const agentBusy = ref(false)
 const tools = ref<{ name: string; description: string; read_only: boolean }[]>([])
+// 对话 id：同一个 id 的多次运行共享上下文
+const conversationId = ref('')
 // 关掉弹窗时要能掐断请求：agent 一次跑几十秒，用户关了它还接着烧额度
 let controller: AbortController | null = null
 
@@ -142,6 +144,8 @@ function handleAgentEvent(event: { type: string; [key: string]: unknown }) {
   if (event.type === 'run') {
     run.id = String(event.run_id || '')
     run.max_turns = Number(event.max_turns || run.max_turns)
+    if (event.conversation_id) conversationId.value = String(event.conversation_id)
+    if (event.conversation_id) conversationId.value = String(event.conversation_id)
   } else if (event.type === 'step') {
     const step = event.step as AgentStep
     run.steps.push(step)
@@ -169,7 +173,7 @@ async function startAgent() {
     const response = await fetch(`${API_BASE}/agent/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ goal: agentGoal.value.trim(), course_id: props.courseId || '', max_turns: 6 }),
+      body: JSON.stringify({ goal: agentGoal.value.trim(), course_id: props.courseId || '', max_turns: 6, conversation_id: conversationId.value }),
       signal: controller.signal,
     })
     if (!response.ok) throw new Error(`请求失败（${response.status}）`)
@@ -486,6 +490,8 @@ watch(() => props.open, (value) => {
           <textarea v-model="agentGoal" rows="3" class="ws-skill-text" placeholder="例如：用 ltspice 看看现在有哪些电路分组，把名字列出来"></textarea>
           <div class="ws-import-actions">
             <button v-if="!agentBusy" class="button primary small" :disabled="!agentGoal.trim()" @click="startAgent">开始</button>
+            <button v-if="!agentBusy && conversationId" class="text-button" @click="conversationId = ''; agentRun = null">新对话</button>
+            <button v-if="!agentBusy && conversationId" class="text-button" @click="conversationId = ''; agentRun = null">新对话</button>
             <button v-else class="button subtle small danger" @click="stopAgent">停止</button>
             <span class="ws-tools-count">可用工具 {{ tools.length }} 个</span>
           </div>
@@ -495,6 +501,8 @@ watch(() => props.open, (value) => {
           <p class="ws-agent-status">
             状态：{{ { running: '运行中', done: '已完成', blocked: '等你确认', failed: '失败' }[agentRun.status] || agentRun.status }}
             · 第 {{ agentRun.turn }}/{{ agentRun.max_turns }} 轮
+            <span v-if="conversationId" class="ws-hint">（同一对话，会记得上次）</span>
+            <span v-if="conversationId" class="ws-hint">（同一对话，会记得上次）</span>
           </p>
 
           <ol class="ws-steps">

@@ -346,6 +346,14 @@ def _watch_parent_process() -> None:
     threading.Thread(target=watch, name="parent-watch", daemon=True).start()
 
 
+
+def _warm_embedding(services) -> None:
+    try:
+        services.retrieval.embedder.embed(["预热"])
+    except Exception:  # noqa: BLE001 - 预热失败不该影响启动，用户提问时还会再试
+        logger.warning("向量模型预热失败", exc_info=True)
+
+
 def create_app(settings: Settings | None = None, embedder=None, llm=None):
     # HelloAgents 0.2.9 prints emoji. A GBK console must not make a valid API request fail.
     for output in (sys.stdout, sys.stderr):
@@ -368,6 +376,10 @@ def create_app(settings: Settings | None = None, embedder=None, llm=None):
         services.memory.start()
         # 后台预热 MCP，用户第一次打开工作区时工具已经在缓存里
         warmup_workspace()
+        # 向量模型也预热：第一次检索要现场加载 332MB 权重（实测 60–80 秒），
+        # 那 80 秒全算在用户第一次提问头上。放后台线程里，不挡 /health。
+        threading.Thread(target=_warm_embedding, args=(services,),
+                         name="embedding-warmup", daemon=True).start()
         yield
         services.memory.close()
         try:
@@ -1204,32 +1216,14 @@ def create_app(settings: Settings | None = None, embedder=None, llm=None):
 
     @app.post("/courses/{course_id}/outlines", status_code=202)
     def generate_outline(course_id: str, tasks: BackgroundTasks):
-        with services.lock, services.sessions() as db:
-            course = require(db, Course, course_id)
-            chapters = db.scalars(select(Chapter).where(Chapter.course_id == course_id)).all()
-            if not chapters or any(not chapter.confirmed for chapter in chapters):
-                raise HTTPException(409, "请先确认章节目录和全部原文归属")
-            if db.scalar(select(Document.id).where(Document.course_id == course_id, Document.status.in_(["queued", "processing"]))):
-                raise HTTPException(409, "请等待资料处理完成后生成复习笔记")
-            if not services.llm.configured:
-                raise HTTPException(503, "请先在页面右上角“模型配置”中接入真实聊天模型")
-            active = db.scalar(select(Job.id).join(Outline).where(Outline.course_id == course_id, Job.status.in_(["queued", "running"])))
-            if active:
-                raise HTTPException(409, "本课程已有复习笔记任务正在运行")
-            snapshot = outline_service.snapshot(db, course_id)
-            if not snapshot["blocks"]:
-                raise HTTPException(409, "没有成功入库的原文")
-            ids = {chapter.id for chapter in chapters}
-            if any(block["chapter_id"] not in ids for block in snapshot["blocks"]):
-                raise HTTPException(409, "部分资料尚未分配章节")
-            outline = Outline(id=new_id(), course_id=course_id, version=course.version, snapshot=snapshot)
-            job = Job(id=new_id(), outline_id=outline.id)
-            db.add(outline)
-            db.flush()
-            db.add(job)
-            db.commit()
-            result = {"job_id": job.id, "outline_id": outline.id}
-        tasks.add_task(outline_service.run, job.id)
+        # 前置校验和建任务都走 outlines.create_job，agent 工具用的是同一份实现
+        from .outlines import GenerationBlocked, create_job
+
+        try:
+            result = create_job(outline_service, services, course_id)
+        except GenerationBlocked as exc:
+            raise HTTPException(exc.status, str(exc)) from exc
+        tasks.add_task(outline_service.run, result["job_id"])
         return result
 
     @app.get("/jobs/{job_id}")

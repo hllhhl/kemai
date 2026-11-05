@@ -26,6 +26,7 @@ from .models import (
     Chapter,
     Course,
     Document,
+    Job,
     Outline,
     PracticeQuestion,
     WrongQuestion,
@@ -79,6 +80,32 @@ def catalog() -> list[dict]:
             },
         },
         {
+            "name": "kemai.course_search",
+            "description": "在这门课的资料里做语义检索（比按字面匹配 notes_read 准）。query 用一句自然语言。",
+            "read_only": True,
+            "destructive": False,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "要查什么，一句话"},
+                    "limit": {"type": "integer", "description": "最多几段，默认 6"},
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "kemai.notes_build",
+            "description": "开始生成这门课的复习笔记。要 30–90 秒；本工具会等到完成或超时。已有笔记时不必重复生成。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "wait_seconds": {"type": "integer", "description": "最多等多久，默认 75，上限 150"},
+                },
+            },
+        },
+        {
             "name": "kemai.docs_export",
             "description": "把最新笔记导出成 docx 或 pptx 文件。kind 取 docx 或 pptx。",
             "read_only": False,
@@ -118,6 +145,8 @@ def call(name: str, args: dict, course_id: str) -> dict:
         "kemai.notes_read": _notes,
         "kemai.practice_read": _practice,
         "kemai.wrong_read": _wrong,
+        "kemai.course_search": _search,
+        "kemai.notes_build": _build,
         "kemai.docs_export": _export,
     }.get(name)
     if handler is None:
@@ -202,7 +231,8 @@ def _notes(args: dict, course_id: str) -> dict:
 
     if len(text) > MAX_NOTE_CHARS:
         text = text[:MAX_NOTE_CHARS] + "\n…（后面还有，已截断）"
-    return {"ok": True, "text": prefix + text}
+    # 把真实字数写在最前面：不写的话模型会自己"感觉"一个数字出来
+    return {"ok": True, "text": f"（笔记正文共 {len(markdown)} 字）\n{prefix}{text}"}
 
 
 def _practice(args: dict, course_id: str) -> dict:
@@ -276,3 +306,76 @@ def _export(args: dict, course_id: str) -> dict:
     else:
         markdown_to_pptx(markdown, title, target)
     return {"ok": True, "text": f"已导出 {name}（{target.stat().st_size} 字节），下载地址 /exports/{name}"}
+
+def _search(args: dict, course_id: str) -> dict:
+    """向量检索。借的是对话那边同一个 RetrievalService，不另起一套索引。"""
+    services = _require()
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return {"ok": False, "text": "query 不能为空"}
+    limit = max(1, min(int(args.get("limit") or 6), 12))
+    try:
+        sources = services.retrieval.search(course_id, query, limit=limit)
+    except Exception as exc:  # noqa: BLE001 - 索引没建好时给一句话，别让循环崩
+        return {"ok": False, "text": f"检索不可用：{type(exc).__name__}: {exc}"}
+    if not sources:
+        return {"ok": True, "text": "没有检索到相关内容"}
+
+    lines = []
+    for index, source in enumerate(sources, 1):
+        text = " ".join(str(source.get("text") or "").split())
+        chapter = source.get("chapter_title") or source.get("chapter") or ""
+        locator = source.get("locator") or {}
+        label = locator.get("label") or locator.get("page") or ""
+        head = " ".join(p for p in (chapter, label) if p)
+        lines.append(f"[{index}] {head}\n{text[:400]}")
+    return {"ok": True, "text": f"检索到 {len(sources)} 段：\n" + "\n\n".join(lines)}
+
+
+_outline_service = None
+
+
+def _build(args: dict, course_id: str) -> dict:
+    """生成笔记：建任务 → 后台线程跑 → 等它完。
+
+    等而不是立即返回，是因为没人愿意替 agent 记住 job id 再问一次。
+    但也不能死等：默认 75 秒，超时就说"还在跑"，让用户过会儿再问。
+    """
+    global _outline_service
+    import threading
+    import time as _time
+
+    from .outlines import GenerationBlocked, OutlineService, create_job
+
+    services = _require()
+    wait = int(args.get("wait_seconds") or 75)
+    wait = max(10, min(wait, 150))
+
+    try:
+        if _outline_service is None:
+            _outline_service = OutlineService(services, services.knowledge_points)
+        job = create_job(_outline_service, services, course_id)
+    except GenerationBlocked as exc:
+        return {"ok": False, "text": str(exc)}
+
+    threading.Thread(target=_outline_service.run, args=(job["job_id"],), daemon=True,
+                     name=f"agent-outline-{job['job_id'][:6]}").start()
+
+    deadline = _time.time() + wait
+    status, markdown = "queued", ""
+    while _time.time() < deadline:
+        _time.sleep(3)
+        with services.sessions() as db:
+            job_row = db.get(Job, job["job_id"])
+            outline = db.get(Outline, job["outline_id"])
+            status = (job_row.status if job_row else "missing") or "queued"
+            error = job_row.error if job_row else ""
+            markdown = (outline.markdown if outline else "") or ""
+        if status in ("completed", "failed"):
+            break
+
+    if status == "completed":
+        return {"ok": True, "text": f"笔记生成完成，正文 {len(markdown)} 字（job {job['job_id'][:8]}）"}
+    if status == "failed":
+        return {"ok": False, "text": f"生成失败：{error or '未知原因'}（job {job['job_id'][:8]}）"}
+    return {"ok": True, "text": f"已经开始了，但 {wait} 秒内没跑完（当前 {status}）。告诉用户稍后再问一次即可，不要重复发起。"}

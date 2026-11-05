@@ -191,6 +191,53 @@ def clean_markdown(text, chapter_title, guidance=False):
     return result
 
 
+class GenerationBlocked(ValueError):
+    """生成被前置条件挡住。消息直接给用户看，status 决定 HTTP 码。"""
+
+    def __init__(self, message: str, status: int = 409):
+        super().__init__(message)
+        self.status = status
+
+
+def create_job(outline_service, services, course_id: str) -> dict:
+    """建一次笔记生成任务。界面端点和 agent 工具都走这里。
+
+    不各自抄一份检查：这些条件是"错一步就白跑一分钟模型"的前置校验，
+    抄两份必然有一份先过期，表现就是界面拦住、agent 却开始跑。
+    """
+    from .models import Chapter, Course, Document, Job, Outline, new_id
+
+    with services.lock, services.sessions() as db:
+        course = db.get(Course, course_id)
+        if course is None:
+            raise GenerationBlocked("课程不存在", 404)
+        chapters = db.scalars(select(Chapter).where(Chapter.course_id == course_id)).all()
+        if not chapters or any(not chapter.confirmed for chapter in chapters):
+            raise GenerationBlocked("请先确认章节目录和全部原文归属")
+        if db.scalar(select(Document.id).where(
+                Document.course_id == course_id, Document.status.in_(["queued", "processing"]))):
+            raise GenerationBlocked("请等待资料处理完成后生成复习笔记")
+        if not services.llm.configured:
+            raise GenerationBlocked("请先在页面右上角「模型配置」中接入真实聊天模型", 503)
+        active = db.scalar(select(Job.id).join(Outline).where(
+            Outline.course_id == course_id, Job.status.in_(["queued", "running"])))
+        if active:
+            raise GenerationBlocked("本课程已有复习笔记任务正在运行")
+        snapshot = outline_service.snapshot(db, course_id)
+        if not snapshot["blocks"]:
+            raise GenerationBlocked("没有成功入库的原文")
+        ids = {chapter.id for chapter in chapters}
+        if any(block["chapter_id"] not in ids for block in snapshot["blocks"]):
+            raise GenerationBlocked("部分资料尚未分配章节")
+        outline = Outline(id=new_id(), course_id=course_id, version=course.version, snapshot=snapshot)
+        job = Job(id=new_id(), outline_id=outline.id)
+        db.add(outline)
+        db.flush()
+        db.add(job)
+        db.commit()
+        return {"job_id": job.id, "outline_id": outline.id}
+
+
 class OutlineService:
     def __init__(self, services, knowledge_points=None):
         self.services = services

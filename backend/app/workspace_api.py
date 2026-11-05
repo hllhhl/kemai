@@ -70,6 +70,8 @@ class AgentStartInput(BaseModel):
     goal: str = Field(min_length=1, max_length=4000)
     course_id: str = ""
     max_turns: int = Field(default=6, ge=1, le=12)
+    # 同一个 conversation_id 的多次运行共享上下文；空串表示每次全新
+    conversation_id: str = ""
 
 
 class AgentResumeInput(BaseModel):
@@ -270,7 +272,10 @@ def register_workspace_routes(app, services) -> None:
         run_id = ""
         pending = None
         answer = ""
-        for event in runtime.stream(services.llm, payload.goal, payload.course_id, payload.max_turns):
+        for event in runtime.stream(
+            services.llm, payload.goal, payload.course_id,
+            payload.max_turns, payload.conversation_id,
+        ):
             if event["type"] == "run":
                 run_id = event["run_id"]
             elif event["type"] == "blocked":
@@ -299,7 +304,10 @@ def register_workspace_routes(app, services) -> None:
                 return "data: " + json.dumps(event, ensure_ascii=False) + chr(10) + chr(10)
 
             try:
-                for event in agent_runtime.stream(services.llm, payload.goal, payload.course_id, payload.max_turns):
+                for event in agent_runtime.stream(
+                    services.llm, payload.goal, payload.course_id,
+                    payload.max_turns, payload.conversation_id,
+                ):
                     yield pack(event)
             except Exception as exc:  # noqa: BLE001 - 出错也要让前端收到一条可读的消息
                 logger.exception("agent 流式中断")

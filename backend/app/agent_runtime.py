@@ -50,6 +50,8 @@ SYSTEM = """你是一个会用工具的课程助手。每一步只输出一个 J
 
 规则：
 - 先想清楚缺什么信息，再决定调哪个工具；能直接回答就别调。
+- **不要问用户"要不要我查一下"**：能查就直接查，查完再说结论。只有真的缺关键信息（比如没说清是哪一章）才问。
+- 数量、字数、条数这类信息一律引用工具返回的数字，不确定就说"没查到"，不要估算。
 - 工具失败时看错误信息决定换一个还是直接告诉用户，不要重复同一个调用。
 - 回答用中文，写明依据来自哪个工具的输出；工具没给的信息不要编。
 - 不确定时用 final 说明缺什么，不要硬凑。
@@ -65,10 +67,12 @@ __SKILLS__
 class AgentRun:
     """一次 agent 循环的状态。要能被"暂停等人确认"，所以状态得留在服务端。"""
 
-    def __init__(self, goal: str, course_id: str = "", max_turns: int = MAX_TURNS):
+    def __init__(self, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
+                 conversation_id: str = ""):
         self.id = uuid.uuid4().hex
         self.goal = goal
         self.course_id = course_id
+        self.conversation_id = conversation_id
         self.max_turns = max_turns
         self.messages: list[dict] = []
         self.steps: list[dict] = []
@@ -88,11 +92,19 @@ class AgentRun:
             "pending": self.pending,
             "turn": self.turn,
             "max_turns": self.max_turns,
+            "conversation_id": self.conversation_id,
         }
 
 
 _runs: dict[str, AgentRun] = {}
 _RUN_TTL = 3600
+
+# 跨轮对话：同一个 conversation_id 的多次运行共享上下文。
+# 只留 user/assistant 这类真正的对话内容，不存 system（提示词每次现拼，
+# 工具清单变了要跟着变，存旧的就是在用过期能力清单）。
+_conversations: dict[str, dict] = {}
+CONVERSATION_TTL = 6 * 3600
+MAX_CONVERSATION_MESSAGES = 16
 
 
 def _gc() -> None:
@@ -100,6 +112,42 @@ def _gc() -> None:
     for run_id, run in list(_runs.items()):
         if now - run.created_at > _RUN_TTL:
             _runs.pop(run_id, None)
+    for conv_id, conv in list(_conversations.items()):
+        if now - conv["updated"] > CONVERSATION_TTL:
+            _conversations.pop(conv_id, None)
+
+
+def _history(conversation_id: str) -> list[dict]:
+    if not conversation_id:
+        return []
+    conv = _conversations.get(conversation_id)
+    return list(conv["messages"]) if conv else []
+
+
+def _remember(conversation_id: str, run: AgentRun) -> None:
+    """把这一轮真正发生过的事情记下来。
+
+    只记三类：用户说了什么、用了哪些工具（名字+一句话结果）、最后结论。
+    把每条工具输出原文都存进去会很快撑爆下一次的上下文预算。
+    """
+    if not conversation_id:
+        return
+    turns: list[dict] = []
+    for step in run.steps:
+        kind = step.get("kind")
+        if kind == "tool" and step.get("tool"):
+            note = (step.get("output") or "")[:160]
+            turns.append(f"[用过 {step['tool']}] {note}")
+        elif kind == "final":
+            continue
+    record = {"role": "assistant", "content": "\n".join(turns) if turns else "（没有调用工具）"}
+    conv = _conversations.setdefault(conversation_id, {"messages": [], "updated": time.time()})
+    conv["messages"].append({"role": "user", "content": run.goal})
+    conv["messages"].append(record)
+    if run.answer:
+        conv["messages"].append({"role": "assistant", "content": run.answer[:1200]})
+    conv["messages"] = conv["messages"][-MAX_CONVERSATION_MESSAGES:]
+    conv["updated"] = time.time()
 
 
 def get_run(run_id: str) -> AgentRun:
@@ -326,20 +374,26 @@ def advance(run: AgentRun, llm) -> dict:
     return run.public()
 
 
-def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS):
+def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
+           conversation_id: str = ""):
     """边跑边报：每一步结束就吐一个事件。
 
     同步跑 4 轮要 85 秒，界面只能转圈。流式之后用户能看到它先查了什么、
     为什么换了个工具——这比最后那句回答更能建立信任。
     """
     _gc()
-    run = AgentRun(goal, course_id, max_turns)
-    run.messages = [
-        {"role": "system", "content": _system_prompt()},
-        {"role": "user", "content": goal},
-    ]
+    # 传空就等于每次全新对话，前端也就永远拿不到 id。这里补一个，
+    # 让「第一次运行」也能成为后续追问的起点。
+    conversation_id = conversation_id or uuid.uuid4().hex
+    run = AgentRun(goal, course_id, max_turns, conversation_id)
+    # 历史放在 system 之后、本次问题之前：模型看得到"上次聊到哪"，
+    # 但本次的工具结果仍然排在最后，优先于旧记忆
+    run.messages = [{"role": "system", "content": _system_prompt()}]
+    run.messages.extend(_history(conversation_id))
+    run.messages.append({"role": "user", "content": goal})
     _runs[run.id] = run
-    yield {"type": "run", "run_id": run.id, "max_turns": run.max_turns}
+    yield {"type": "run", "run_id": run.id, "max_turns": run.max_turns,
+           "conversation_id": conversation_id}
 
     if not getattr(llm, "configured", False):
         run.status = "failed"
@@ -352,16 +406,20 @@ def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS):
         if run.steps:
             yield {"type": "step", "step": run.steps[-1]}
         if outcome == "blocked":
+            _remember(conversation_id, run)
             yield {"type": "blocked", "pending": run.pending}
             return
         if outcome == "failed":
+            _remember(conversation_id, run)
             yield {"type": "error", "message": run.answer}
             return
         if outcome == "done":
+            _remember(conversation_id, run)
             yield {"type": "final", "answer": run.answer}
             return
 
     _close_out(run)
+    _remember(conversation_id, run)
     yield {"type": "final", "answer": run.answer}
 
 

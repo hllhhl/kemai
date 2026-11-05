@@ -233,3 +233,48 @@ def test_kemai_tools_route_to_course_tools(monkeypatch):
     events = list(agent_runtime.stream(llm, "看课程", course_id="course-1"))
     assert events[-1]["type"] == "final"
     assert called == [("kemai.course_brief", "course-1")]
+
+
+def test_conversation_history_is_reused(fake_tools):
+    """同一个 conversation_id 的第二次运行，要能看到上一次聊过什么。"""
+    llm = FakeLLM([{"action": "final", "answer": "第一次回答"}])
+    list(agent_runtime.stream(llm, "第一章讲什么", conversation_id="conv-1"))
+
+    llm2 = FakeLLM([{"action": "final", "answer": "第二章回答"}])
+    list(agent_runtime.stream(llm2, "那第二章呢", conversation_id="conv-1"))
+
+    sent = json.dumps(llm2.seen[0], ensure_ascii=False)
+    assert "第一章讲什么" in sent, "上一条提问没带过去"
+    assert "第一次回答" in sent, "上一次结论没带过去"
+
+
+def test_new_conversation_starts_empty(fake_tools):
+    llm = FakeLLM([{"action": "final", "answer": "第一次"}])
+    list(agent_runtime.stream(llm, "私密问题一", conversation_id="conv-A"))
+
+    fresh = FakeLLM([{"action": "final", "answer": "第二次"}])
+    list(agent_runtime.stream(fresh, "无关问题", conversation_id="conv-B"))
+    sent = json.dumps(fresh.seen[0], ensure_ascii=False)
+    assert "私密问题一" not in sent, "不同对话串味了"
+
+
+def test_conversation_records_tool_usage_not_full_output(fake_tools):
+    """记忆里只留"用过什么工具 + 一句结果"，不留完整输出，否则下次预算被撑爆。"""
+    llm = FakeLLM([
+        {"action": "tool", "tool": "demo.read", "args": {}},
+        {"action": "final", "answer": "好了"},
+    ])
+    list(agent_runtime.stream(llm, "读一下", conversation_id="conv-C"))
+    conv = agent_runtime._conversations["conv-C"]
+    blob = json.dumps(conv["messages"], ensure_ascii=False)
+    assert "demo.read" in blob
+    assert len(blob) < 2000, f"记忆太长：{len(blob)}"
+
+
+def test_stream_generates_a_conversation_id_when_missing(fake_tools):
+    """第一次运行必须回一个 id 回来，否则前端无从"接着上次说"。"""
+    llm = FakeLLM([{"action": "final", "answer": "答"}])
+    events = list(agent_runtime.stream(llm, "随便问问"))
+    run_event = next(e for e in events if e["type"] == "run")
+    assert run_event["conversation_id"], "没有生成 conversation_id"
+    assert agent_runtime.get_run(run_event["run_id"]).conversation_id == run_event["conversation_id"]
