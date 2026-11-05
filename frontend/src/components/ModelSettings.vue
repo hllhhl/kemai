@@ -130,6 +130,19 @@ function addProvider() {
     keyInput: '', clearKey: false, headerInput: '', clearHeaders: false }
   providers.value.push(provider); selectProvider(provider.id)
 }
+/** 找出第一个没填模型 ID 的条目，顺便把它选中，省得用户自己翻。 */
+function firstIncompleteModel(): string {
+  for (const provider of providers.value) {
+    for (let index = 0; index < provider.models.length; index += 1) {
+      if (provider.models[index].id.trim()) continue
+      selectProvider(provider.id)
+      selectedModelIndex.value = index
+      return `「${provider.name}」里第 ${index + 1} 个模型还没填模型 ID。填上，或者把它移除。`
+    }
+  }
+  return ''
+}
+
 function addModel(known?: CatalogModel, identity = '') {
   const provider = selectedProvider.value
   if (!provider) return
@@ -377,7 +390,13 @@ async function loadCatalog() {
 async function submit(action: 'save' | 'check' | 'discover') {
   if (disabled.value || (action === 'save' && props.active)) return
   // Check only the selected provider/model for probes; a draft elsewhere need not be complete.
-  if (action === 'save' && !panel.value?.reportValidity()) return
+  if (action === 'save') {
+    // 空 ID 的模型如果没被选中，就不会渲染 required 输入框，reportValidity 也发现不了，
+    // 结果一路提交到后端才报「模型 ID 必须非空」——用户根本不知道该改哪一条。
+    const problem = firstIncompleteModel()
+    if (problem) { error.value = problem; return }
+    if (!panel.value?.reportValidity()) return
+  }
   busy.value = action; error.value = ''; feedback.value = ''
   try {
     if (action === 'save') {
@@ -604,7 +623,7 @@ onUnmounted(() => {
           </section>
           <section class="model-editor-section">
             <div class="model-group-title"><h3>已添加模型</h3><span>{{ selectedProvider.models.length }}</span></div>
-            <div class="model-saved-list"><button v-for="(model, index) in selectedProvider.models" :key="index" type="button" class="model-saved-row" :class="{ selected: selectedModelIndex === index }" :aria-pressed="selectedModelIndex === index" @click="selectedModelIndex = index; removal = ''"><span>{{ model.name || model.id || '待填写模型' }}</span><small>{{ model.supports_images ? '文字 + 图片' : '文字' }}{{ model.reasoning ? ' / 推理' : '' }}</small><b v-if="selection?.provider_id === selectedProvider.id && selection?.model_id === model.id && model.id">已选择</b></button></div>
+            <div class="model-saved-list"><button v-for="(model, index) in selectedProvider.models" :key="index" type="button" class="model-saved-row" :class="{ selected: selectedModelIndex === index, incomplete: !model.id.trim() }" :aria-pressed="selectedModelIndex === index" @click="selectedModelIndex = index; removal = ''"><span>{{ model.name || model.id || '未填模型 ID' }}</span><small>{{ !model.id.trim() ? '点这里填 ID，或移除' : `${model.supports_images ? '文字 + 图片' : '文字'}${model.reasoning ? ' / 推理' : ''}` }}</small><b v-if="selection?.provider_id === selectedProvider.id && selection?.model_id === model.id && model.id">已选择</b></button></div>
             <p v-if="!selectedModel" class="model-empty muted">从目录添加一个模型，或手动填写服务商提供的模型 ID。</p>
             <div v-if="selectedModel" class="model-editor">
               <div class="model-editor-title"><h3>{{ selectedModel.name || selectedModel.id || '新模型' }}</h3><button type="button" class="text-button danger" :disabled="active" @click="askRemoval('model')">移除模型</button></div>
@@ -722,6 +741,9 @@ onUnmounted(() => {
 .model-saved-row > span { flex: 1; overflow-wrap: anywhere; min-width: 0; }
 .model-saved-row small, .model-saved-row b { flex-shrink: 0; font-size: 11px; font-weight: 400; }
 .model-saved-row b { color: var(--accent); }
+/* 空模型 ID 不是"一个未知模型"，是还没填完的一行，得看得出要处理 */
+.model-saved-row.incomplete { border-color: var(--warning); background: var(--warning-soft); }
+.model-saved-row.incomplete > span { color: var(--warning); }
 .model-saved-row.selected { border-color: var(--accent-line); background: var(--soft); }
 .model-empty { padding: 20px 0; }
 .model-editor { margin-top: 20px; }
