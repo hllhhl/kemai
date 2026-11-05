@@ -42,7 +42,34 @@ let backend = null;
 let win = null;
 let quitting = false;
 
-function log(...args) { console.log(`[课脉 +${sinceStart()}]`, ...args); }
+// 装在 Program Files 时安装目录不可写，日志必须落在 userData
+const LOG_PATH = () => path.join(app.getPath('userData'), 'backend.log');
+const LOG_LIMIT = 2 * 1024 * 1024;
+let logStream = null;
+
+// 界面报错时会提示"看 backend.log"，所以这里必须真的写文件。
+// GUI 进程的 stdout 在 Windows 上会被丢弃，只 console.log 等于没日志。
+function openLog() {
+  try {
+    const target = LOG_PATH();
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    try {
+      if (fs.statSync(target).size > LOG_LIMIT) fs.renameSync(target, `${target}.1`);
+    } catch {
+      /* 文件不存在就不用轮转 */
+    }
+    logStream = fs.createWriteStream(target, { flags: 'a' });
+    log('日志文件：' + target);
+  } catch (error) {
+    console.error('日志文件打不开', error);
+  }
+}
+
+function log(...args) {
+  const line = `[课脉 +${sinceStart()}] ${args.join(' ')}`;
+  console.log(line);
+  if (logStream) logStream.write(`${line}\n`);
+}
 
 function portOpen() {
   return new Promise((resolve) => {
@@ -88,7 +115,7 @@ function startBackend() {
     log('后端退出，代码', code);
     backend = null;
     if (!quitting && win) {
-      dialog.showErrorBox('课脉 · 后端已停止', `本地服务意外退出（代码 ${code}）。\n请重启课脉；如果反复出现，查看 _package/backend.log。`);
+      dialog.showErrorBox('课脉 · 后端已停止', `本地服务意外退出（代码 ${code}）。\n请重启课脉；如果反复出现，查看 data/backend.log。`);
     }
   });
 }
@@ -172,7 +199,7 @@ async function boot() {
 
   const ready = await waitForBackend();
   if (!ready) {
-    dialog.showErrorBox('课脉 · 启动失败', '本地服务没有在 90 秒内就绪。\n请检查 _package/backend.log，或手动运行 uv run python -m uvicorn app.main:app --app-dir backend');
+    dialog.showErrorBox('课脉 · 启动失败', '本地服务没有在 90 秒内就绪。\n请查看日志文件，或手动运行 uv run python -m uvicorn app.main:app --app-dir backend');
     app.quit();
     return;
   }
@@ -202,6 +229,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
+    openLog();
     log('Electron 就绪');
     boot().catch((error) => {
       const message = String(error && error.message ? error.message : error);
