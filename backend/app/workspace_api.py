@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from sqlalchemy import select
 
-from . import agent_runtime, course_tools, longterm
+from . import agent_runtime, audit, course_tools, longterm
 from . import importers
 from . import skills as skill_store
 from .concierge import plan as build_plan
@@ -346,6 +346,16 @@ def register_workspace_routes(app, services) -> None:
         return {"tools": agent_runtime.tool_catalog(probe=probe)}
 
     # ── 长期记忆：文件在哪、写了什么 ──────────────────────
+    @app.get("/audit")
+    def audit_tail(limit: int = 50, day: str = ""):
+        """最近的动作：谁调了什么、放行还是拦下、成没成。新的在前。"""
+        return {"entries": audit.tail(limit=min(limit, 200), day=day)}
+
+    @app.get("/audit/verify")
+    def audit_verify(day: str = ""):
+        """校验哈希链。怀疑日志被改过时用它——断了会指出第几行。"""
+        return audit.verify(day=day)
+
     @app.get("/memory")
     def memory_inventory():
         """记忆都存在磁盘上，这里只列清单，界面点开再看内容。"""

@@ -25,8 +25,8 @@ import time
 import uuid
 from typing import Any
 
-from . import course_tools
-from .mcp_client import McpError, hub
+from . import audit, course_tools
+from .mcp_client import McpError, hub, tool_allowed
 from .sentinel import ALLOW, ASK, DENY, sentinel
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,9 @@ class AgentRun:
         self.status = "running"          # running | done | blocked | failed
         self.answer = ""
         self.pending: dict | None = None  # 等待确认的那一次调用
+        # 技能可以用 allowed-tools 声明"我只允许用这些工具"，越界要问
+        self.active_skill = ""
+        self.allowed_tools: list[str] = []
         self.turn = 0
         self.created_at = time.time()
 
@@ -176,10 +179,17 @@ def tool_catalog(probe: bool = False) -> list[dict]:
         logger.warning("读取 MCP 清单失败", exc_info=True)
         return catalog
 
+    try:
+        raw = hub().config().get("servers", {})
+    except Exception:  # noqa: BLE001
+        raw = {}
     for server in overview.get("servers", []):
         if server.get("disabled") or server.get("error"):
             continue
+        config = raw.get(server["name"]) or {}
         for tool in server.get("tools", []):
+            if not tool_allowed(config, tool["name"]):
+                continue
             catalog.append({
                 "name": f"{server['name']}.{tool['name']}",
                 "server": server["name"],
@@ -260,6 +270,12 @@ def call_tool(tool_name: str, args: dict, timeout: float = 60.0) -> dict:
         return {"ok": False, "text": f"工具名要写成 服务器.工具，收到的是 {tool_name}"}
     server_name, tool = tool_name.rsplit(".", 1)
     try:
+        config = hub().config().get("servers", {}).get(server_name) or {}
+        if not tool_allowed(config, tool):
+            return {"ok": False, "text": f"{tool_name} 不在这个服务器的白名单里（看 mcp.json 的 allow_tools）"}
+    except Exception:  # noqa: BLE001 - 配置读不出来就交给下面的调用去报错
+        pass
+    try:
         result = hub().server(server_name).call(tool, args, timeout=timeout)
     except McpError as exc:
         return {"ok": False, "text": str(exc)}
@@ -325,6 +341,8 @@ def _turn(run: AgentRun, llm) -> str:
             from . import skills as skill_store
 
             skill = skill_store.load_skill(name)
+            run.active_skill = name
+            run.allowed_tools = [str(t) for t in (skill.get("allowed_tools") or [])]
             _observe(run, f"技能 {name}", skill.get("body", "")[:MAX_OBSERVATION])
         except KeyError:
             _observe(run, f"技能 {name}", "没有这个技能")
@@ -339,24 +357,46 @@ def _turn(run: AgentRun, llm) -> str:
 
         catalog = tool_catalog(probe=True)
         verdict = _assess(tool_name, catalog)
+
+        # 技能声明的工具范围：越界不硬拒，抬成"要问一句"——
+        # 技能的 allowed-tools 常常写成 Bash(xxx:*) 这种别的 agent 的语法，
+        # 我们只能大致对上，判错了硬拒会把它自己卡死
+        if run.allowed_tools and not _tool_in_scope(tool_name, run.allowed_tools):
+            verdict = {**verdict, "decision": ASK,
+                       "reason": f"技能 {run.active_skill} 只声明了 {'、'.join(run.allowed_tools)}，这一步超出范围"}
         # reason 也要留痕：界面要能回答"为什么这一步被拒了"
         run.steps[-1].update({"tool": tool_name, "args": _mask(args),
                               "risk": verdict["risk"], "decision": verdict["decision"],
                               "reason": verdict.get("reason", "")})
 
         if verdict["decision"] == DENY:
+            audit.record(tool=tool_name, args=args, decision=DENY, ok=False, run_id=run.id,
+                         conversation_id=run.conversation_id, course_id=run.course_id,
+                         risk=verdict.get("risk", ""), error=verdict["reason"])
             _observe(run, tool_name, f"被拒绝：{verdict['reason']}")
             return "continue"
         if verdict["decision"] == ASK:
+            audit.record(tool=tool_name, args=args, decision=ASK, ok=False, run_id=run.id,
+                         conversation_id=run.conversation_id, course_id=run.course_id,
+                         risk=verdict.get("risk", ""), error="等待用户确认")
             run.status = "blocked"
             run.pending = {"tool": tool_name, "args": args,
                            "risk": verdict["risk"], "reason": verdict["reason"]}
             return "blocked"
 
+        started = time.time()
         if tool_name.startswith("kemai."):
             result = course_tools.call(tool_name, args, run.course_id)
         else:
             result = call_tool(tool_name, args)
+        audit.record(
+            tool=tool_name, args=args, decision=verdict["decision"], ok=result["ok"],
+            ms=int((time.time() - started) * 1000), run_id=run.id,
+            conversation_id=run.conversation_id, course_id=run.course_id,
+            risk=verdict.get("risk", ""),
+            error="" if result["ok"] else result["text"][:200],
+            approved_by="user" if run.steps[-1].get("approved") else "",
+        )
         run.steps[-1].update({"ok": result["ok"], "output": result["text"][:400]})
         _observe(run, tool_name, result["text"])
         return "continue"
@@ -436,6 +476,31 @@ def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
     _close_out(run)
     _remember(conversation_id, run)
     yield {"type": "final", "answer": run.answer}
+
+
+def _tool_in_scope(tool: str, patterns: list[str]) -> bool:
+    """技能写的 allowed-tools 能对上这个工具吗。
+
+    兼容几种写法：
+        kemai.course_brief   精确
+        ltspice.*            通配
+        Bash(browser-use:*)  别的 agent 的语法，取括号里的第一段当提示
+    """
+    from fnmatch import fnmatch
+
+    for raw in patterns:
+        pattern = raw.strip()
+        if not pattern:
+            continue
+        # Bash(browser-use:*) → browser-use
+        inner = pattern[pattern.find("(") + 1:pattern.rfind(")")] if "(" in pattern and ")" in pattern else ""
+        candidates = [pattern, inner.split(":")[0] if inner else ""]
+        for candidate in candidates:
+            if candidate and (fnmatch(tool, candidate) or fnmatch(tool, candidate + ".*")):
+                return True
+            if candidate and candidate in tool:
+                return True
+    return False
 
 
 def _mask(args: dict) -> dict:

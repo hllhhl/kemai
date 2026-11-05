@@ -89,6 +89,9 @@ def describe(path: Path, root: Path) -> dict | None:
         "chars": len(text),
         "words": len(body.split()),
         "agent_created": str(meta.get("agent_created") or "").lower() == "true",
+        # 技能可以声明它允许用哪些工具，形如 Bash(browser-use:*) 或 ltspice.*
+        "allowed_tools": [t.strip() for t in str(meta.get("allowed-tools") or "").split(",") if t.strip()],
+        "version": str(meta.get("version") or ""),
     }
 
 

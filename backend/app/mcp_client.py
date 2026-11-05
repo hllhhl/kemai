@@ -62,6 +62,23 @@ def load_config() -> dict:
     return {"path": "", "servers": {}}
 
 
+def tool_allowed(server_config: dict, tool: str) -> bool:
+    """mcp.json 里可选的 allow_tools / deny_tools。
+
+    UUMit 一个服务器 56 个工具，全塞进提示词会把它自己淹了。
+    写白名单只暴露用得上的几个，比"整台服务器开或关"细一档。
+    """
+    from fnmatch import fnmatch
+
+    deny = server_config.get("deny_tools") or []
+    if any(fnmatch(tool, str(p)) for p in deny):
+        return False
+    allow = server_config.get("allow_tools") or []
+    if allow:
+        return any(fnmatch(tool, str(p)) for p in allow)
+    return True
+
+
 class McpServer:
     """一个 MCP 服务器 = 一个长驻子进程 + 一条请求/响应队列。"""
 
