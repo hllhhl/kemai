@@ -53,6 +53,12 @@ const registry = ref<Registry | null>(null)
 const modelBusy = ref('')
 const modelError = ref('')
 const modelWrap = ref<HTMLElement | null>(null)
+
+// 历史对话：后端把每轮对话落盘，这里只是读列表
+type SessionRow = { id: string; title: string; course_id: string; updated_at: number; messages: number }
+const sessions = ref<SessionRow[]>([])
+const sessionsOpen = ref(false)
+const sessionsLoading = ref(false)
 const thread = ref<HTMLElement | null>(null)
 const box = ref<HTMLTextAreaElement | null>(null)
 const copied = ref(-1)
@@ -127,6 +133,70 @@ async function loadRegistry() {
   } catch {
     registry.value = null
   }
+}
+
+const TOOL_NOTE = /^\[用过 /
+
+/** 后端存的是 user/assistant 流水，工具痕迹那条不入界面。 */
+function toHistory(messages: { role: string; content: string }[]): Message[] {
+  const result: Message[] = []
+  for (const item of messages) {
+    const text = String(item.content || '')
+    if (item.role === 'user') result.push({ role: 'user', text })
+    else if (item.role === 'assistant' && !TOOL_NOTE.test(text)) {
+      result.push({ role: 'assistant', text, steps: [], status: 'done', seconds: 0, error: '', pending: null })
+    }
+  }
+  return result
+}
+
+async function toggleSessions() {
+  sessionsOpen.value = !sessionsOpen.value
+  if (!sessionsOpen.value) return
+  sessionsLoading.value = true
+  try {
+    const payload = await api<{ conversations: SessionRow[] }>(
+      `/agent/conversations?course_id=${encodeURIComponent(props.courseId || '')}`,
+    )
+    sessions.value = payload.conversations
+  } catch {
+    sessions.value = []
+  } finally {
+    sessionsLoading.value = false
+  }
+}
+
+async function openSession(id: string) {
+  sessionsOpen.value = false
+  stop()
+  try {
+    const payload = await api<{ messages: { role: string; content: string }[] }>(`/agent/conversations/${id}`)
+    history.value = toHistory(payload.messages)
+    conversationId.value = id
+    scrollToEnd()
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function removeSession(id: string) {
+  try {
+    await api(`/agent/conversations/${id}`, { method: 'DELETE' })
+    sessions.value = sessions.value.filter((item) => item.id !== id)
+    if (conversationId.value === id) reset()
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+function timeLabel(stamp: number) {
+  if (!stamp) return ''
+  const date = new Date(stamp * 1000)
+  const today = new Date()
+  const sameDay = date.toDateString() === today.toDateString()
+  return sameDay
+    ? date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+    : date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
 }
 
 async function toggleModelMenu() {
@@ -447,6 +517,25 @@ watch(() => props.taskId, (id) => {
 
     <!-- 对话 -->
     <template v-else>
+      <div class="chat-bar">
+        <button class="bar-button" @click="toggleSessions">
+          对话历史<span v-if="sessions.length"> · {{ sessions.length }}</span>
+        </button>
+        <button class="bar-button" @click="reset">新对话</button>
+        <div v-if="sessionsOpen" class="sessions">
+          <p class="sessions-title">最近的对话</p>
+          <div v-for="item in sessions" :key="item.id" class="session-row">
+            <button class="session-open" @click="openSession(item.id)">
+              <span class="session-title">{{ item.title }}</span>
+              <span class="session-meta">{{ item.messages }} 条 · {{ timeLabel(item.updated_at) }}</span>
+            </button>
+            <button class="session-del" title="删除这段对话" @click.stop="removeSession(item.id)">×</button>
+          </div>
+          <p v-if="sessionsLoading" class="model-empty-row">读取中…</p>
+          <p v-else-if="!sessions.length" class="model-empty-row">还没有历史对话</p>
+        </div>
+      </div>
+
       <div ref="thread" class="chat-scroll">
         <div v-if="!history.length" class="chat-empty">
           <h1>今天要做什么？</h1>
@@ -607,6 +696,20 @@ watch(() => props.taskId, (id) => {
 
 <style scoped>
 .chat-page { display: flex; flex-direction: column; height: calc(100vh - 96px); max-width: 860px; margin: 0 auto; }
+
+.chat-bar { position: relative; display: flex; align-items: center; gap: 8px; padding: 0 4px 6px; flex: none; }
+.bar-button { border: 1px solid transparent; background: transparent; color: var(--muted); font-size: 12px; padding: 4px 9px; border-radius: 8px; cursor: pointer; font-family: inherit; }
+.bar-button:hover { color: var(--accent-dark); background: var(--soft); border-color: var(--line); }
+
+.sessions { position: absolute; top: 30px; left: 4px; width: 300px; max-height: 340px; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 14px 36px rgba(24, 34, 54, .16); padding: 6px; z-index: 20; }
+.sessions-title { margin: 6px 8px 4px; font-size: 10.5px; color: var(--muted); }
+.session-row { display: flex; align-items: stretch; gap: 2px; }
+.session-open { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; border: 0; background: transparent; border-radius: 7px; padding: 7px 9px; cursor: pointer; text-align: left; font-family: inherit; }
+.session-open:hover { background: var(--soft); }
+.session-title { font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-meta { font-size: 10.5px; color: var(--muted); }
+.session-del { flex: none; width: 24px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 14px; border-radius: 6px; font-family: inherit; }
+.session-del:hover { color: var(--danger); background: var(--danger-soft); }
 
 .chat-scroll { flex: 1; overflow-y: auto; padding: 8px 4px 24px; display: flex; flex-direction: column; gap: 22px; }
 

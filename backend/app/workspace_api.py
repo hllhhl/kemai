@@ -345,6 +345,27 @@ def register_workspace_routes(app, services) -> None:
         """模型能用的工具清单（界面展示用，也用来解释它为什么选了某个）。"""
         return {"tools": agent_runtime.tool_catalog(probe=probe)}
 
+    @app.get("/agent/conversations")
+    def agent_conversation_list(course_id: str = "", limit: int = 30):
+        """历史对话。关掉应用再回来还能接着问，靠的就是这些文件。"""
+        return {"conversations": agent_runtime.list_conversations(course_id, min(max(limit, 1), 100))}
+
+    @app.get("/agent/conversations/{conversation_id}")
+    def agent_conversation_read(conversation_id: str):
+        conv = agent_runtime.load_conversation(conversation_id)
+        if conv is None:
+            raise HTTPException(404, "没有这个对话，可能已经被删了")
+        return {
+            "id": conversation_id,
+            "title": conv.get("title", ""),
+            "messages": conv["messages"],
+            "updated_at": conv.get("updated", 0),
+        }
+
+    @app.delete("/agent/conversations/{conversation_id}")
+    def agent_conversation_delete(conversation_id: str):
+        return {"deleted": agent_runtime.delete_conversation(conversation_id)}
+
     # ── 长期记忆：文件在哪、写了什么 ──────────────────────
     @app.get("/audit")
     def audit_tail(limit: int = 50, day: str = ""):

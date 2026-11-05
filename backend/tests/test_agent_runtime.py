@@ -459,3 +459,51 @@ def test_a_short_answer_is_not_worth_archiving(monkeypatch, fake_tools):
     agent_runtime.advance(run, llm)
 
     assert not written
+
+
+def test_conversation_is_saved_and_survives_a_restart(tmp_path, monkeypatch, fake_tools):
+    """关掉应用再打开，对话得还在。
+
+    之前会话只放在内存 dict 里，进程一退就没了——这是「Agent 该有的功能」
+    里最不该缺的一个。
+    """
+    monkeypatch.setattr(agent_runtime, "_session_dir", lambda: tmp_path)
+    agent_runtime._conversations.clear()
+
+    llm = FakeLLM([{"action": "final", "answer": "这门课现在有 3 份资料，全部已解析完成。"}])
+    result = agent_runtime.start(llm, "这门课有几份资料", "course-1", max_turns=2)
+    conversation_id = result["conversation_id"]
+
+    assert conversation_id, "第一次提问也要拿到会话 id，否则存不下来"
+    assert (tmp_path / f"{conversation_id}.json").is_file()
+
+    # 模拟进程退出：内存清空，只剩磁盘上的文件
+    agent_runtime._conversations.clear()
+
+    rows = agent_runtime.list_conversations()
+    assert [row["id"] for row in rows] == [conversation_id]
+    assert rows[0]["title"].startswith("这门课有几份资料")
+    conv = agent_runtime.load_conversation(conversation_id)
+    assert conv is not None
+    assert any("3 份资料" in item["content"] for item in conv["messages"] if item["role"] == "assistant")
+
+
+def test_conversation_ids_cannot_escape_the_folder(tmp_path, monkeypatch):
+    """id 是从外面传进来的，拼文件名前必须挡住 ../ 这类写法。"""
+    monkeypatch.setattr(agent_runtime, "_session_dir", lambda: tmp_path)
+
+    with pytest.raises(ValueError):
+        agent_runtime._session_path("../evil")
+    with pytest.raises(ValueError):
+        agent_runtime._session_path("../../etc/passwd")
+
+
+def test_deleting_a_conversation_removes_the_file(tmp_path, monkeypatch, fake_tools):
+    monkeypatch.setattr(agent_runtime, "_session_dir", lambda: tmp_path)
+    agent_runtime._conversations.clear()
+    llm = FakeLLM([{"action": "final", "answer": "这是一个足够长的结论，用来生成一条会话记录。"}])
+    conversation_id = agent_runtime.start(llm, "随便问问", "c1", max_turns=2)["conversation_id"]
+
+    assert agent_runtime.delete_conversation(conversation_id) is True
+    assert not (tmp_path / f"{conversation_id}.json").exists()
+    assert agent_runtime.load_conversation(conversation_id) is None

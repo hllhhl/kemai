@@ -21,8 +21,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from . import audit, course_tools
@@ -131,10 +133,116 @@ def _gc() -> None:
             _conversations.pop(conv_id, None)
 
 
+def _session_dir() -> Path:
+    """会话记录存放处。放在 data 下，跟着用户数据一起搬。"""
+    from .config import Settings
+
+    root = Settings.from_env().data_dir / "agent-sessions"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _session_path(conversation_id: str) -> Path:
+    # 用 id 直接拼文件名，必须挡住 ../ 这类路径穿越
+    if not re.fullmatch(r"[0-9a-f]{6,64}", conversation_id):
+        raise ValueError("会话标识无效")
+    return _session_dir() / f"{conversation_id}.json"
+
+
+def _title_of(messages: list[dict]) -> str:
+    for message in messages:
+        if message.get("role") == "user" and str(message.get("content") or "").strip():
+            text = " ".join(str(message["content"]).split())
+            return text[:40] + ("…" if len(text) > 40 else "")
+    return "未命名对话"
+
+
+def persist_conversation(conversation_id: str) -> None:
+    """把这一轮说完的话写到磁盘。
+
+    之前只放在内存 dict 里，关掉应用对话就没了——成熟 agent 都留着历史，
+    用户第二天回来还得能接着问。
+    """
+    conv = _conversations.get(conversation_id)
+    if not conv:
+        return
+    try:
+        payload = {
+            "id": conversation_id,
+            "course_id": conv.get("course_id", ""),
+            "title": conv.get("title") or _title_of(conv["messages"]),
+            "created_at": conv.get("created_at") or conv["updated"],
+            "updated_at": conv["updated"],
+            "messages": conv["messages"],
+        }
+        _session_path(conversation_id).write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - 存不下来不该影响这次对话的结果
+        logger.debug("会话落盘失败", exc_info=True)
+
+
+def load_conversation(conversation_id: str) -> dict | None:
+    """先看内存，再看磁盘。老会话重启后照样能接着聊。"""
+    if conversation_id in _conversations:
+        return _conversations[conversation_id]
+    try:
+        path = _session_path(conversation_id)
+    except ValueError:
+        return None
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - 文件坏了就当没有，别让聊天整个起不来
+        return None
+    conv = {
+        "messages": payload.get("messages") or [],
+        "updated": float(payload.get("updated_at") or 0),
+        "course_id": payload.get("course_id", ""),
+        "title": payload.get("title", ""),
+        "created_at": payload.get("created_at"),
+    }
+    _conversations[conversation_id] = conv
+    return conv
+
+
+def list_conversations(course_id: str = "", limit: int = 30) -> list[dict]:
+    rows: list[dict] = []
+    for path in _session_dir().glob("*.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            continue
+        if course_id and payload.get("course_id") != course_id:
+            continue
+        messages = payload.get("messages") or []
+        rows.append({
+            "id": payload.get("id") or path.stem,
+            "title": payload.get("title") or _title_of(messages),
+            "course_id": payload.get("course_id", ""),
+            "updated_at": payload.get("updated_at") or 0,
+            "messages": len(messages),
+        })
+    rows.sort(key=lambda item: item["updated_at"], reverse=True)
+    return rows[:limit]
+
+
+def delete_conversation(conversation_id: str) -> bool:
+    _conversations.pop(conversation_id, None)
+    try:
+        path = _session_path(conversation_id)
+    except ValueError:
+        return False
+    if path.is_file():
+        path.unlink()
+        return True
+    return False
+
+
 def _history(conversation_id: str) -> list[dict]:
     if not conversation_id:
         return []
-    conv = _conversations.get(conversation_id)
+    conv = load_conversation(conversation_id)
     return list(conv["messages"]) if conv else []
 
 
@@ -182,6 +290,9 @@ def _remember(conversation_id: str, run: AgentRun) -> None:
         conv["messages"].append({"role": "assistant", "content": run.answer[:1200]})
     conv["messages"] = conv["messages"][-MAX_CONVERSATION_MESSAGES:]
     conv["updated"] = time.time()
+    conv["course_id"] = run.course_id
+    conv["title"] = conv.get("title") or _title_of(conv["messages"])
+    persist_conversation(conversation_id)
 
 
 def get_run(run_id: str) -> AgentRun:
@@ -356,9 +467,12 @@ def call_tool(tool_name: str, args: dict, timeout: float = 60.0) -> dict:
 # ── 循环 ─────────────────────────────────────────────────
 
 
-def start(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS) -> dict:
+def start(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
+          conversation_id: str = "") -> dict:
     _gc()
-    run = AgentRun(goal, course_id, max_turns)
+    # 和 stream 保持一致：不传就给一个 id，否则这条路径的对话永远存不下来
+    conversation_id = conversation_id or uuid.uuid4().hex
+    run = AgentRun(goal, course_id, max_turns, conversation_id)
     run.messages = [
         {"role": "system", "content": _system_prompt()},
         {"role": "user", "content": goal},
