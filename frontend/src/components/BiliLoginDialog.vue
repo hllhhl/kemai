@@ -151,26 +151,26 @@ onUnmounted(stopPolling)
 </template>
 
 <style scoped>
-.bili-mask { position: fixed; inset: 0; background: rgba(32, 29, 25, .35); display: flex; align-items: center; justify-content: center; z-index: 60; }
-.bili-panel { width: min(640px, 92vw); background: var(--panel, #fffdf8); border-radius: 14px; padding: 20px 22px; box-shadow: 0 18px 48px rgba(32, 29, 25, .25); }
+.bili-mask { position: fixed; inset: 0; background: rgba(24, 34, 54, .35); display: flex; align-items: center; justify-content: center; z-index: 60; }
+.bili-panel { width: min(640px, 92vw); background: var(--panel, var(--surface)); border-radius: 14px; padding: 20px 22px; box-shadow: 0 18px 48px rgba(24, 34, 54, .25); }
 .bili-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .bili-head h2 { margin: 0 0 4px; font-size: 16px; }
-.bili-sub { margin: 0; font-size: 12px; color: var(--muted, #857c70); line-height: 1.6; }
+.bili-sub { margin: 0; font-size: 12px; color: var(--muted, var(--muted)); line-height: 1.6; }
 .bili-body { display: grid; grid-template-columns: 220px 1fr; gap: 20px; margin-top: 16px; }
-.bili-qr { width: 220px; height: 220px; border: 1px solid var(--line, #e3ddd1); border-radius: 10px; background: #fff; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+.bili-qr { width: 220px; height: 220px; border: 1px solid var(--line, var(--line)); border-radius: 10px; background: #fff; display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .bili-qr img { width: 100%; height: 100%; }
-.bili-qr-empty { font-size: 12px; color: var(--muted, #857c70); }
+.bili-qr-empty { font-size: 12px; color: var(--muted, var(--muted)); }
 .bili-side { display: flex; flex-direction: column; gap: 10px; }
-.bili-state { margin: 0; font-size: 13px; padding: 7px 10px; border-radius: 8px; background: #faf7f0; }
-.state-scanned { background: #f6ded6; color: #8c3520; }
-.state-ok { background: #dfeee2; color: #2f5c3c; }
-.state-expired, .state-error { background: #f7e0dc; color: #96331f; }
-.bili-steps { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.9; color: var(--muted, #857c70); }
-.bili-error { margin: 0; font-size: 12px; color: #96331f; }
+.bili-state { margin: 0; font-size: 13px; padding: 7px 10px; border-radius: 8px; background: var(--surface-alt); }
+.state-scanned { background: var(--soft); color: var(--danger); }
+.state-ok { background: #dfeee2; color: var(--success); }
+.state-expired, .state-error { background: var(--danger-soft); color: var(--danger); }
+.bili-steps { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.9; color: var(--muted, var(--muted)); }
+.bili-error { margin: 0; font-size: 12px; color: var(--danger); }
 .bili-actions { display: flex; gap: 8px; margin-top: auto; }
 .bili-logged { margin-top: 16px; }
 .bili-ok { margin: 0 0 6px; font-size: 14px; }
-.bili-mid { margin-left: 8px; font-size: 12px; color: var(--muted, #857c70); }
-.bili-note { margin: 0; font-size: 11.5px; color: var(--muted, #857c70); line-height: 1.6; }
+.bili-mid { margin-left: 8px; font-size: 12px; color: var(--muted, var(--muted)); }
+.bili-note { margin: 0; font-size: 11.5px; color: var(--muted, var(--muted)); line-height: 1.6; }
 @media (max-width: 620px) { .bili-body { grid-template-columns: 1fr; } .bili-qr { margin: 0 auto; } }
 </style>

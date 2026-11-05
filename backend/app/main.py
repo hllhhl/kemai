@@ -21,7 +21,7 @@ from .chat_answers import ChatAnswerGrounding
 from .config import Settings
 from .file_chapters import chapter_role, document_role
 from .finder_api import close_finder_client, register_finder_routes
-from .workspace_api import close_workspace, register_workspace_routes
+from .workspace_api import close_workspace, register_workspace_routes, warmup_workspace
 from .llm import ModelClient, ModelRuntimeError, model_failure_message
 from .models import AppMeta, Block, Chapter, ChatSession, Course, Document, Job, Message, Outline, PracticeQuestion, PracticeSet, new_id
 from .model_images import image_resolution_current
@@ -335,6 +335,8 @@ def create_app(settings: Settings | None = None, embedder=None, llm=None):
         services.recover()
         review_space.recover()
         services.memory.start()
+        # 后台预热 MCP，用户第一次打开工作区时工具已经在缓存里
+        warmup_workspace()
         yield
         services.memory.close()
         try:

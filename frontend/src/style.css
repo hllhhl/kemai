@@ -70,11 +70,8 @@ a { color: var(--accent); text-underline-offset: 3px; }
 .brand { display: flex; align-items: center; gap: 13px; color: var(--ink); text-decoration: none; padding: 0 9px; }
 .brand strong { display: block; line-height: 1.25; font-size: 25px; letter-spacing: 3px; font-weight: 700; }
 .brand small { display: block; color: var(--muted); font-size: 11px; margin-top: 5px; }
-.brand-mark { height: 40px; width: 37px; display: flex; align-items: flex-end; gap: 4px; }
-.brand-mark span { width: 9px; height: 31px; background: var(--accent); border-radius: 2px 2px 0 0; display: block; position: relative; }
-.brand-mark span:after { content: ''; height: 2px; position: absolute; inset: auto 2px 6px; background: #fff9; }
-.brand-mark span:nth-child(2) { height: 38px; background: #6b82dd; }
-.brand-mark span:nth-child(3) { height: 27px; background: #a6b7eb; }
+/* 与桌面图标同一套：一个节点分出三条脉络 */
+.brand-mark { height: 34px; width: 32px; color: var(--accent); flex: none; }
 .workspace-label { font-size: 12px; color: var(--muted); padding-left: 12px; margin-bottom: 12px; }
 .main-nav { display: flex; flex-direction: column; gap: 5px; }
 .nav-item { position: relative; border: 0; background: transparent; border-radius: 8px; min-height: 46px; display: flex; align-items: center; gap: 12px; padding: 11px 13px; color: #53617b; text-align: left; font-size: 14px; }
@@ -389,9 +386,9 @@ a { color: var(--accent); text-underline-offset: 3px; }
 }
 
 /* B 站登录入口的在线状态点 */
-.bili-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #c8bfae; margin-right: 6px; vertical-align: middle; }
-.bili-dot.on { background: #3d7a52; }
+.bili-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--line); margin-right: 6px; vertical-align: middle; }
+.bili-dot.on { background: var(--success); }
 
 /* B 站登录入口的在线状态点 */
-.bili-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #c8bfae; margin-right: 6px; vertical-align: middle; }
-.bili-dot.on { background: #3d7a52; }
+.bili-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--line); margin-right: 6px; vertical-align: middle; }
+.bili-dot.on { background: var(--success); }

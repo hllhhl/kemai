@@ -296,34 +296,34 @@ watch(() => props.courseId, () => { scan.value = null; candidates.value = []; se
 
 <style scoped>
 .finder-grid { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 16px; }
-.finder-block { border: 1px solid var(--line, #e3ddd1); border-radius: 10px; padding: 14px 16px; background: var(--panel, #fffdf8); margin-bottom: 16px; }
+.finder-block { border: 1px solid var(--line, var(--line)); border-radius: 10px; padding: 14px 16px; background: var(--panel, var(--surface)); margin-bottom: 16px; }
 .finder-block h3 { margin: 0 0 10px; font-size: 15px; }
-.finder-label { display: block; font-size: 12px; color: var(--muted, #857c70); margin-bottom: 10px; }
-.finder-label input { width: 100%; margin-top: 4px; padding: 7px 9px; border: 1px solid var(--line, #e3ddd1); border-radius: 6px; background: #fff; }
+.finder-label { display: block; font-size: 12px; color: var(--muted, var(--muted)); margin-bottom: 10px; }
+.finder-label input { width: 100%; margin-top: 4px; padding: 7px 9px; border: 1px solid var(--line, var(--line)); border-radius: 6px; background: #fff; }
 .finder-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 8px; }
-.finder-stats div { background: #faf7f0; border-radius: 6px; padding: 7px 9px; }
-.finder-stats span { display: block; font-size: 11px; color: var(--muted, #857c70); }
+.finder-stats div { background: var(--surface-alt); border-radius: 6px; padding: 7px 9px; }
+.finder-stats span { display: block; font-size: 11px; color: var(--muted, var(--muted)); }
 .finder-stats strong { font-size: 15px; }
 .finder-stats .mono { font-size: 12px; }
 .finder-actions { display: flex; gap: 8px; margin: 10px 0; }
 .finder-inline { display: flex; gap: 8px; margin-top: 8px; }
-.finder-inline input, .finder-inline select { flex: 1; padding: 6px 9px; border: 1px solid var(--line, #e3ddd1); border-radius: 6px; background: #fff; }
-.finder-candidate { display: block; width: 100%; text-align: left; border: 1px solid var(--line, #e3ddd1); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: #fff; cursor: pointer; }
-.finder-candidate.active { border-color: #a4432a; box-shadow: 0 0 0 2px rgba(164, 67, 42, .1); }
+.finder-inline input, .finder-inline select { flex: 1; padding: 6px 9px; border: 1px solid var(--line, var(--line)); border-radius: 6px; background: #fff; }
+.finder-candidate { display: block; width: 100%; text-align: left; border: 1px solid var(--line, var(--line)); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; background: #fff; cursor: pointer; }
+.finder-candidate.active { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(52, 85, 219, .12); }
 .finder-candidate-head { display: flex; justify-content: space-between; gap: 10px; }
 .finder-candidate-head strong { font-size: 13px; line-height: 1.5; }
-.finder-bar { height: 4px; background: #efe9dc; border-radius: 3px; margin: 6px 0; overflow: hidden; }
-.finder-bar span { display: block; height: 100%; background: #3d7a52; border-radius: 3px; }
+.finder-bar { height: 4px; background: var(--line); border-radius: 3px; margin: 6px 0; overflow: hidden; }
+.finder-bar span { display: block; height: 100%; background: var(--success); border-radius: 3px; }
 .finder-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-.finder-table th, .finder-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #efe9dc; }
-.finder-table th { font-size: 11px; color: var(--muted, #857c70); font-weight: 500; }
+.finder-table th, .finder-table td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.finder-table th { font-size: 11px; color: var(--muted, var(--muted)); font-weight: 500; }
 .mono { font-family: ui-monospace, Consolas, monospace; }
 .finder-cell { display: flex; gap: 4px; flex-wrap: wrap; }
-.finder-digest { border-top: 1px dashed #efe9dc; padding-top: 10px; margin-top: 10px; }
+.finder-digest { border-top: 1px dashed var(--line); padding-top: 10px; margin-top: 10px; }
 .finder-digest-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 6px; }
 .finder-points { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.8; }
-.finder-stamp { color: #a4432a; font-size: 11px; margin-right: 4px; }
+.finder-stamp { color: var(--accent); font-size: 11px; margin-right: 4px; }
 .small { font-size: 11.5px; }
-.muted { color: var(--muted, #857c70); }
+.muted { color: var(--muted, var(--muted)); }
 
 </style>

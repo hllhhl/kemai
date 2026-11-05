@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -104,3 +105,19 @@ def close_workspace() -> None:
         hub().close_all()
     except Exception:  # noqa: BLE001
         logger.warning("关闭 MCP 服务器失败", exc_info=True)
+
+
+def warmup_workspace() -> None:
+    """后端启动后在后台把 MCP 工具列表预先拉一遍。
+
+    否则进程重启后的第一次打开工作区要等 20 秒（两个服务器握手）。
+    用守护线程跑，不阻塞 /health，界面该秒开还是秒开。
+    """
+    def run() -> None:
+        try:
+            hub().overview(probe=True)
+            logger.info("MCP 预热完成")
+        except Exception:  # noqa: BLE001 - 预热失败不该影响启动
+            logger.warning("MCP 预热失败", exc_info=True)
+
+    threading.Thread(target=run, name="mcp-warmup", daemon=True).start()

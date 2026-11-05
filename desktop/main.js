@@ -35,11 +35,14 @@ const ICON = path.join(ROOT, 'assets', 'kemai.ico');
 const SELFTEST = process.env.KEMAI_SELFTEST === '1';
 const SHOT_PATH = process.env.KEMAI_SHOT || path.join(ROOT, '_package', 'desktop-selftest.png');
 
+const T0 = Date.now();
+function sinceStart() { return ((Date.now() - T0) / 1000).toFixed(2) + 's'; }
+
 let backend = null;
 let win = null;
 let quitting = false;
 
-function log(...args) { console.log('[课脉]', ...args); }
+function log(...args) { console.log(`[课脉 +${sinceStart()}]`, ...args); }
 
 function portOpen() {
   return new Promise((resolve) => {
@@ -104,8 +107,9 @@ function createWindow() {
     height: 880,
     minWidth: 960,
     minHeight: 640,
-    show: false,
-    backgroundColor: '#fffdf8',
+    // 立即显示：双击后先看到品牌启动页，而不是等后端起来才出窗口
+    show: true,
+    backgroundColor: '#f4f6fb',
     title: '课脉',
     icon: fs.existsSync(ICON) ? ICON : undefined,
     autoHideMenuBar: true,
@@ -121,15 +125,15 @@ function createWindow() {
   // 先给一个启动页，避免后端没起来时白屏
   win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(`<!doctype html>
 <html><head><meta charset="utf-8"><style>
-html,body{height:100%;margin:0;background:#fffdf8;color:#201d19;
+html,body{height:100%;margin:0;background:#f4f6fb;color:#24324b;
   font:14px/1.7 -apple-system,"Microsoft YaHei",sans-serif;display:flex;
   align-items:center;justify-content:center;flex-direction:column;gap:14px}
-.mark{width:64px;height:64px;border-radius:14px;background:#a4432a;color:#fffdf8;
+.mark{width:64px;height:64px;border-radius:14px;background:#3455db;color:#fff;
   display:flex;align-items:center;justify-content:center;font-size:34px;font-weight:700}
-.t{font-size:15px;font-weight:600}.s{color:#857c70;font-size:12.5px}
-</style></head><body><div class="mark">课</div><div class="t">课脉</div><div class="s">正在启动本地服务…</div></body></html>`));
+.t{font-size:15px;font-weight:600}.s{color:#66738a;font-size:12.5px}
+</style></head><body><div class="mark">课</div><div class="t">课脉</div><div class="s">正在启动本地服务，通常 3–5 秒…</div></body></html>`));
 
-  win.once('ready-to-show', () => { win.show(); });
+  win.once('ready-to-show', () => { win.show(); win.focus(); });
 
   // 站内链接留在窗口里，外部链接交给系统浏览器
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -148,7 +152,9 @@ html,body{height:100%;margin:0;background:#fffdf8;color:#201d19;
 }
 
 async function boot() {
+  log('开始启动后端');
   createWindow();
+  log('窗口已创建');
 
   if (await portOpen()) {
     log('检测到已有后端在运行，直接复用');
@@ -166,6 +172,7 @@ async function boot() {
 
   log('后端就绪，加载界面');
   await win.loadURL(BASE + '/');
+  log('界面已加载');
 
   if (SELFTEST) {
     win.show();
@@ -188,6 +195,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(() => {
+    log('Electron 就绪');
     boot().catch((error) => {
       const message = String(error && error.message ? error.message : error);
       console.error('[课脉] 启动异常：' + message);

@@ -358,7 +358,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
   <div class="app-shell">
     <a class="skip-link" href="#main-content">跳到主要内容</a>
     <aside class="sidebar course-sidebar">
-      <a class="brand" href="#" @click.prevent="section = 'library'"><div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div><div><strong>课脉</strong><small>课程知识体系</small></div></a>
+      <a class="brand" href="#" @click.prevent="section = 'library'"><svg class="brand-mark" viewBox="0 0 36 40" aria-hidden="true" fill="none"><circle cx="6" cy="20" r="3" fill="currentColor"/><path d="M9 20h6M15 20l13-9M15 20h13M15 20l13 9" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg><div><strong>课脉</strong><small>课程知识体系</small></div></a>
       <div class="workspace-label">你的复习空间</div>
       <nav class="main-nav" aria-label="主要功能"><button v-for="(item, key) in sectionMeta" :key="key" :class="['nav-item', { active: section === key }]" :aria-current="section === key ? 'page' : undefined" @click="section = key as Section"><UiIcon :name="key as Section" /><span>{{ item.label }}</span><span v-if="section === key" class="nav-active-dot" aria-hidden="true"></span></button></nav>
       <div class="sidebar-courses">
