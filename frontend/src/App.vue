@@ -19,6 +19,7 @@ import NotesReader from './components/NotesReader.vue'
 import KnowledgePointsPanel from './components/KnowledgePointsPanel.vue'
 import CourseFinderPanel from './components/CourseFinderPanel.vue'
 import BiliLoginDialog from './components/BiliLoginDialog.vue'
+import WorkspaceDialog from './components/WorkspaceDialog.vue'
 import UiIcon from './components/UiIcon.vue'
 import TokenUsage from './components/TokenUsage.vue'
 import { uploadAccept, uploadFormatsLabel } from './uploadFormats'
@@ -40,6 +41,7 @@ const creatingCourse = ref(false)
 const modelSettingsOpen = ref(false)
 const memoryOpen = ref(false)
 const biliLoginOpen = ref(false)
+const workspaceOpen = ref(false)
 const biliLoggedIn = ref(false)
 const memoryBusy = ref(false)
 const practiceBusy = ref(false)
@@ -368,7 +370,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
       <div class="sidebar-bottom"><span class="leaf-icon">✳</span><p>让复习有出处，<br />让每一页都连起来。</p><div class="local-badge"><span></span> 本机个人工作台</div></div>
     </aside>
     <div class="workspace managed-workspace">
-      <header class="topbar"><div class="breadcrumb"><span class="breadcrumb-course">{{ course?.name || '复习空间' }}</span><span class="breadcrumb-divider">/</span><span>{{ sectionMeta[section].label }}</span></div><div class="topbar-actions"><button class="button subtle small" @click="biliLoginOpen = true"><span class="bili-dot" :class="{ on: biliLoggedIn }"></span>B 站{{ biliLoggedIn ? '已登录' : '登录' }}</button><button v-if="courseId" class="button subtle small" @click="memoryOpen = true">记忆</button><button class="button subtle small" @click="modelSettingsOpen = true"><UiIcon name="settings" />模型配置</button><div :class="['health-pill', { offline: !!connectionError }]" :title="connectionError || '后端服务已连接'"><span></span>{{ initialLoading ? '连接中' : connectionError ? '服务未连接' : '服务已连接' }}</div></div></header>
+      <header class="topbar"><div class="breadcrumb"><span class="breadcrumb-course">{{ course?.name || '复习空间' }}</span><span class="breadcrumb-divider">/</span><span>{{ sectionMeta[section].label }}</span></div><div class="topbar-actions"><button class="button subtle small" @click="biliLoginOpen = true"><span class="bili-dot" :class="{ on: biliLoggedIn }"></span>B 站{{ biliLoggedIn ? '已登录' : '登录' }}</button><button v-if="courseId" class="button subtle small" @click="memoryOpen = true">记忆</button><button class="button subtle small" @click="workspaceOpen = true">工作区</button><button class="button subtle small" @click="modelSettingsOpen = true"><UiIcon name="settings" />模型配置</button><div :class="['health-pill', { offline: !!connectionError }]" :title="connectionError || '后端服务已连接'"><span></span>{{ initialLoading ? '连接中' : connectionError ? '服务未连接' : '服务已连接' }}</div></div></header>
       <main id="main-content" tabindex="-1" class="main-content" :class="{ 'with-review-chat': courseId && section !== 'library' && section !== 'space' && section !== 'finder', 'review-space-content': courseId && (section === 'space' || section === 'finder') }">
         <div v-if="section !== 'space' || !courseId" class="page-heading"><div><p class="course-caption">{{ course?.name || '从一门课程开始' }}</p><h1>{{ sectionMeta[section].title }}</h1><p>{{ sectionMeta[section].intro }}</p></div><div v-if="course" class="heading-note"><span>当前课程</span><strong>{{ readyCount }} 份资料可用于复习</strong></div></div>
         <div v-if="connectionError" class="notice error" role="alert"><strong>无法连接服务</strong><span>{{ connectionError }}</span><button class="text-button" @click="initialise">重新连接</button></div>
@@ -443,5 +445,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
     <ModelSettings v-if="modelSettingsOpen" :active="spaceBusy || chatting || !!activeJob || practiceModelBusy" @close="modelSettingsOpen = false" @saved="refreshHealth" />
     <ManagementDialog v-if="management" :key="`${management.action}:${management.id}`" :title="management.title" :description="management.description" :initial-name="management.initialName" :confirm-text="management.confirmText" :danger="management.danger" :busy="managementBusy" :error="managementError" @close="management = null" @submit="submitManagement" />
     <BiliLoginDialog :open="biliLoginOpen" @close="biliLoginOpen = false" @changed="refreshBiliStatus" />
+    <WorkspaceDialog :open="workspaceOpen" @close="workspaceOpen = false" />
+    <WorkspaceDialog :open="workspaceOpen" @close="workspaceOpen = false" />
   </div>
 </template>

@@ -21,6 +21,7 @@ from .chat_answers import ChatAnswerGrounding
 from .config import Settings
 from .file_chapters import chapter_role, document_role
 from .finder_api import close_finder_client, register_finder_routes
+from .workspace_api import close_workspace, register_workspace_routes
 from .llm import ModelClient, ModelRuntimeError, model_failure_message
 from .models import AppMeta, Block, Chapter, ChatSession, Course, Document, Job, Message, Outline, PracticeQuestion, PracticeSet, new_id
 from .model_images import image_resolution_current
@@ -345,7 +346,11 @@ def create_app(settings: Settings | None = None, embedder=None, llm=None):
                 try:
                     close_finder_client()
                 finally:
-                    services.engine.dispose()
+                    try:
+                        # MCP 服务器是长驻子进程，退出时必须一起收掉
+                        close_workspace()
+                    finally:
+                        services.engine.dispose()
 
     app = FastAPI(title="课脉 · 课程知识体系 Agent", version="0.1.0", lifespan=lifespan)
     app.state.services, app.state.sessions, app.state.settings = services, services.sessions, settings
@@ -1260,6 +1265,8 @@ def create_app(settings: Settings | None = None, embedder=None, llm=None):
 
     # PPT 反查整门课：路由单独成模块，避免 main.py 继续变长
     register_finder_routes(app, services)
+    # 工作区：MCP 工具 + 技能包
+    register_workspace_routes(app)
 
     # 桌面端（Electron）只需要一个进程：后端顺带把已构建的界面托管在同一个端口。
     # 必须放在所有 API 路由之后、且挂在 "/"，否则会把接口吃掉。
