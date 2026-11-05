@@ -29,7 +29,8 @@ from .workspace_api import close_workspace, register_workspace_routes, warmup_wo
 from .llm import ModelClient, ModelRuntimeError, model_failure_message
 from .models import AppMeta, Block, Chapter, ChatSession, Course, Document, Job, Message, Outline, PracticeQuestion, PracticeSet, new_id
 from .model_images import image_resolution_current
-from .model_registry import ModelRegistryInput, ModelProbeInput, ProviderInput, OAuthAnswerInput, ModelRemovalInput, ProviderLogoutInput
+from .model_registry import (ActiveModelInput, ModelRegistryInput, ModelProbeInput, ProviderInput,
+                             OAuthAnswerInput, ModelRemovalInput, ProviderLogoutInput)
 from .model_oauth import ModelOAuthManager
 from .outlines import NOTES_STYLE, OutlineService
 from .practice import PracticeService
@@ -551,6 +552,18 @@ def create_app(settings: Settings | None = None, embedder=None, llm=None):
             ensure_model_idle("正在处理复习任务，请结束任务后再保存或切换模型")
             try:
                 return services.model_config.save_registry(payload.model_dump())
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            except OSError as exc:
+                raise HTTPException(500, "无法保存模型配置，请检查本地 data 目录的写入权限") from exc
+
+    @app.post("/system/model-registry/active")
+    def switch_active_model(payload: ActiveModelInput):
+        """只改「用哪个模型」，不动服务商与凭据——聊天框里切换走这条。"""
+        with services.lock:
+            ensure_model_idle("正在处理复习任务，请结束任务后再切换模型")
+            try:
+                return services.model_config.set_active(payload.provider_id, payload.model_id)
             except ValueError as exc:
                 raise HTTPException(422, str(exc)) from exc
             except OSError as exc:

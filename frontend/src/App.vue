@@ -508,7 +508,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
     <BiliLoginDialog :open="biliLoginOpen" @close="biliLoginOpen = false" @changed="refreshBiliStatus" />
     <WorkspaceDialog :open="workspaceOpen" :course-id="courseId" @close="workspaceOpen = false" />
     <ConciergeDock
-      v-if="!initialLoading"
+      v-if="!initialLoading && section !== 'task'"
       :course-id="courseId"
       :course-name="course?.name || ''"
       :chapter-id="''"

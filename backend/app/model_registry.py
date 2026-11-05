@@ -82,6 +82,13 @@ class ModelProbeInput(ConfigInput):
     model: ManagedModelInput
 
 
+class ActiveModelInput(BaseModel):
+    """切换「用哪个模型」时的入参：空串表示暂时不用模型。"""
+
+    provider_id: str = ""
+    model_id: str = ""
+
+
 class OAuthAnswerInput(ConfigInput):
     prompt_id: str = Field(min_length=1, max_length=100)
     value: str = Field(default="", max_length=8000)
@@ -330,6 +337,30 @@ class ModelConfigStore:
     def save_registry(self, values):
         with self.lock:
             self._write(self.registry_candidate(values))
+            return self.public_registry()
+
+    def set_active(self, provider_id: str, model_id: str):
+        """只切换「用哪个模型」，不碰服务商和凭据。
+
+        设置页保存走整表 PUT，那条路要从界面把每个服务商的凭据按"留空=保留"
+        重新提交一遍。在聊天框里切个模型不该冒这个险：少一个字段就可能把密钥
+        覆盖掉，所以单独开一条只动 active 的路。
+        """
+        with self.lock:
+            registry = deepcopy(self.registry)
+            if not provider_id and not model_id:
+                registry["active"] = None
+                self._write(registry)
+                return self.public_registry()
+            provider = next((item for item in registry["providers"] if item["id"] == provider_id), None)
+            if provider is None:
+                raise ValueError("这个服务商已经不在了，刷新一下再选")
+            if not any(model["id"] == model_id for model in provider["models"]):
+                raise ValueError("这个服务商下没有该模型，刷新一下再选")
+            candidate = {**registry, "active": {"provider_id": provider_id, "model_id": model_id}}
+            if not self._snapshot(candidate).configured:
+                raise ValueError("这个模型还没配好凭据，先去「模型配置」里补上")
+            self._write(candidate)
             return self.public_registry()
 
     def oauth_path(self, provider_id):
