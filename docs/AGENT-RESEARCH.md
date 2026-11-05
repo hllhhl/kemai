@@ -33,7 +33,7 @@
 | 10 | browser-use/browser-use | 120091 | 浏览器 agent | DOM 抽取 + 受限动作空间 + 视觉回退 | 待做（可选）：PPT 找课若要自动翻页核对，可借鉴动作空间约束 |
 | 11 | stablyai/orca | 116041 | 多 agent 编队：每个 agent 独立 worktree，一处统一跟踪，可手机端监控 | **并行会话 + 统一状态面板**；每个任务独立工作区，互不污染 | 待做：课脉一次只能跑一个 agent run |
 | 12 | addyosmani/agent-skills | 113368 | 生产级编码 agent 技能集 | 技能按「触发条件—步骤—验证」三段写，且每个都带反例 | 待做：课脉当前 12 个技能结构不统一 |
-| 13 | thedotmack/claude-mem | 113245 | 跨会话持久记忆压缩系统 | 自动捕获会话 → 压缩 → 下次注入；而不是靠人工写记忆 | 待做：课脉 longterm.py 靠 agent 主动 `memory_write`，容易漏 |
+| 13 | thedotmack/claude-mem | 113245 | 跨会话持久记忆压缩系统 | 自动捕获会话 → 压缩 → 下次注入；而不是靠人工写记忆 | **已落地**：`agent_runtime._archive()` 在任务完成时自动把「问的什么 → 结论」写进每日记忆，不再指望模型自己调 memory_write |
 | 14 | paperclipai/paperclip | 111256 | 管理工作中的 agent 的应用 | 多 agent 的任务派发与状态追踪（据描述） | 不适用（单用户学习场景） |
 | 15 | bytedance/deer-flow | 85018 | 长时程 SuperAgent：研究 + 编码 | 长任务的规划—执行—复盘分层，避免单轮上下文爆掉 | 部分：课脉 max_turns=6 + fit_context，缺「阶段性复盘」 |
 | 16 | lobehub/lobehub | 83991 | agent 编排与协作 UI | 会话/角色/模型的可视化组织 | 不适用（课脉 UI 已定形） |
@@ -50,6 +50,15 @@
 2. **工具调用分块渲染**（#20 的 `ToolUseBlock`/`ToolResultBlock` 思路）
    - 新建任务页现在逐步显示「调了哪个工具、返回什么」，而不是一行摘要
 3. **＋菜单外点关闭 / Esc**（交互缺陷，不来自哪个项目，属于基础体验）
+4. **技能质量检查 `lint_skill`**（#12 addyosmani/agent-skills 的四段式 +
+   本机 ltspice-mcp 的「已确认缺陷与绕行」写法）
+   - 本机 21 个技能跑出 19 个不合格，绝大多数缺 allowed-tools 和避坑段
+5. **会话结束自动归档记忆**（#13 claude-mem）
+   - `_archive()` 在两个入口（`/agent/run` 与 `/agent/stream`）都接上了
+   - 只存「问题 + 结论摘要」，工具输出全文不入库，避免吃掉下次的上下文预算
+   - 短于 20 字的结论不写，防止「好的」这类回复污染日志
+   - 实测：跑完「这门课有几份资料？」，`data/memory/logs/2026-11-05.md` 自动多出
+     「这门课有几份资料？ → 这门课有 3 份资料，且 3 份都已解析完成。」
 
 ## 下一批要落的（按价值排序）
 

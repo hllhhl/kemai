@@ -138,6 +138,26 @@ def _history(conversation_id: str) -> list[dict]:
     return list(conv["messages"]) if conv else []
 
 
+def _archive(run: AgentRun) -> None:
+    """任务做完，把「问了什么 + 结论」自动写进每日记忆。
+
+    照 claude-mem 的思路：记忆不该指望模型自己想起来调 memory_write——
+    它十次里有八次会忘。改成结束时自动落一行，日志里能对上哪次做了什么。
+
+    只存摘要：工具输出全文进日志会很快把下一次的上下文预算吃掉。
+    """
+    answer = (run.answer or "").strip()
+    if len(answer) < 20:
+        return
+    goal = " ".join(run.goal.split())[:80]
+    summary = " ".join(answer.split())[:220]
+    try:
+        from . import longterm
+        longterm.append_log(f"{goal}\n  → {summary}", run.course_id)
+    except Exception:  # noqa: BLE001 - 记忆写不进去不该影响这次任务的结果
+        logger.debug("自动记忆写入失败", exc_info=True)
+
+
 def _remember(conversation_id: str, run: AgentRun) -> None:
     """把这一轮真正发生过的事情记下来。
 
@@ -495,9 +515,15 @@ def advance(run: AgentRun, llm) -> dict:
     while run.status == "running" and run.turn < run.max_turns:
         outcome = _turn(run, llm)
         if outcome in ("done", "blocked", "failed"):
+            if outcome == "done":
+                # 非流式这条路径也要记住并归档，否则同一个问题走 /agent/run
+                # 和走 /agent/stream 留下的痕迹不一样。
+                _remember(run.conversation_id, run)
+                _archive(run)
             return run.public()
 
     _close_out(run)
+    _archive(run)
     return run.public()
 
 
@@ -542,11 +568,13 @@ def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
             return
         if outcome == "done":
             _remember(conversation_id, run)
+            _archive(run)
             yield {"type": "final", "answer": run.answer}
             return
 
     _close_out(run)
     _remember(conversation_id, run)
+    _archive(run)
     yield {"type": "final", "answer": run.answer}
 
 

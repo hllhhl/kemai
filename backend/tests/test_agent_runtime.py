@@ -385,3 +385,77 @@ def test_same_failing_call_is_blocked_after_two(fake_tools, monkeypatch):
     assert len(calls) == 2, f"应该只真的执行两次，实际 {len(calls)}"
     told = " ".join(str(m["content"]) for m in run.messages)
     assert "已经失败两次" in told
+
+
+def test_finished_run_is_archived_into_memory(monkeypatch, fake_tools):
+    """任务做完要自动留一行记忆，而不是指望模型自己想起来写。
+
+    claude-mem 的做法：记忆靠会话结束时自动落盘。这里验证 /agent/run 这条路径
+    也会归档，否则同一个问题走两个接口留下的痕迹不一样。
+    """
+    from app import longterm
+
+    written: list[tuple[str, str]] = []
+    monkeypatch.setattr(longterm, "append_log",
+                        lambda text, course_id="": written.append((text, course_id)) or {"path": "", "bytes": 0})
+
+    llm = FakeLLM([{"action": "final", "answer": "这门课现在有 3 份资料，全部都已解析完成并建立索引。"}])
+    run = agent_runtime.AgentRun("这门课有几份资料", "course-9")
+    agent_runtime.advance(run, llm)
+
+    assert written, "任务完成后应当写一条记忆"
+    text, course = written[0]
+    assert "这门课有几份资料" in text and "3 份资料" in text
+    assert course == "course-9"
+
+
+def test_a_short_answer_is_not_worth_archiving(monkeypatch, fake_tools):
+    """「好的」这种两字结论不该污染日志。"""
+    from app import longterm
+
+    written: list[str] = []
+    monkeypatch.setattr(longterm, "append_log",
+                        lambda text, course_id="": written.append(text) or {"path": "", "bytes": 0})
+
+    llm = FakeLLM([{"action": "final", "answer": "好"}])
+    run = agent_runtime.AgentRun("随便问问", "c1")
+    agent_runtime.advance(run, llm)
+
+    assert not written
+
+
+def test_finished_run_is_archived_into_memory(monkeypatch, fake_tools):
+    """任务做完要自动留一行记忆，而不是指望模型自己想起来写。
+
+    claude-mem 的做法：记忆靠会话结束时自动落盘。这里验证 /agent/run 这条路径
+    也会归档，否则同一个问题走两个接口留下的痕迹不一样。
+    """
+    from app import longterm
+
+    written: list[tuple[str, str]] = []
+    monkeypatch.setattr(longterm, "append_log",
+                        lambda text, course_id="": written.append((text, course_id)) or {"path": "", "bytes": 0})
+
+    llm = FakeLLM([{"action": "final", "answer": "这门课现在有 3 份资料，全部都已解析完成并建立索引。"}])
+    run = agent_runtime.AgentRun("这门课有几份资料", "course-9")
+    agent_runtime.advance(run, llm)
+
+    assert written, "任务完成后应当写一条记忆"
+    text, course = written[0]
+    assert "这门课有几份资料" in text and "3 份资料" in text
+    assert course == "course-9"
+
+
+def test_a_short_answer_is_not_worth_archiving(monkeypatch, fake_tools):
+    """「好的」这种两字结论不该污染日志。"""
+    from app import longterm
+
+    written: list[str] = []
+    monkeypatch.setattr(longterm, "append_log",
+                        lambda text, course_id="": written.append(text) or {"path": "", "bytes": 0})
+
+    llm = FakeLLM([{"action": "final", "answer": "好"}])
+    run = agent_runtime.AgentRun("随便问问", "c1")
+    agent_runtime.advance(run, llm)
+
+    assert not written
