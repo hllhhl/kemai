@@ -251,6 +251,116 @@ function adopt(registry: ModelRegistry) {
   if (previousModel) selectedModelIndex.value = Math.max(0, selectedProvider.value?.models.findIndex(model => model.id === previousModel) ?? 0)
   dirty.value = false; applying = false
 }
+// ── 配置导出 / 导入 ──────────────────────────────────────
+// 导出刻意不含 api_key 和 headers：这两样可能是密钥（有些服务商把凭据放在
+// 自定义头里），一旦被当成"配置文件"传来传去就是泄露。导入时重新填一次，
+// 代价小得多。
+type ImportedProvider = {
+  id: string; name: string; provider?: string; base_url?: string
+  timeout_seconds?: number; credential_mode?: string
+  needs_api_key?: boolean; needs_headers?: boolean
+  models?: { id: string; name?: string; api?: string; context_window?: number; max_tokens?: number
+             reasoning?: boolean; supports_images?: boolean }[]
+}
+const importData = ref<{ active: ModelSelection | null; providers: ImportedProvider[] } | null>(null)
+const importKeys = ref<Record<string, string>>({})
+
+function exportConfig() {
+  const registry = stored.value
+  if (!registry) return
+  const payload = {
+    format: 'kemai-model-config',
+    version: 1,
+    exported_at: new Date().toISOString(),
+    note: '不含 API Key 与自定义请求头。导入后需要补填这两项；留空则沿用本机原配置。',
+    active: registry.active,
+    providers: registry.providers.map((provider) => ({
+      id: provider.id,
+      name: provider.name,
+      provider: provider.provider,
+      base_url: provider.base_url,
+      timeout_seconds: provider.timeout_seconds,
+      credential_mode: provider.credential_mode,
+      needs_api_key: provider.has_api_key,
+      needs_headers: provider.has_headers,
+      models: provider.models.map((model) => ({
+        id: model.id, name: model.name, api: model.api,
+        context_window: model.context_window, max_tokens: model.max_tokens,
+        reasoning: model.reasoning, supports_images: model.supports_images,
+      })),
+    })),
+  }
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = `kemai-model-config-${new Date().toISOString().slice(0, 10)}.json`
+  link.click()
+  URL.revokeObjectURL(link.href)
+  feedback.value = '已导出配置（不含密钥）'
+}
+
+async function onImportFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''  // 清空，允许连续选同一个文件
+  if (!file) return
+  error.value = ''
+  try {
+    const data = JSON.parse(await file.text())
+    if (!data || data.format !== 'kemai-model-config' || !Array.isArray(data.providers)) {
+      throw new Error('这不是课脉导出的模型配置文件')
+    }
+    if (!data.providers.length) throw new Error('文件里没有服务商')
+    importData.value = { active: data.active || null, providers: data.providers }
+    importKeys.value = Object.fromEntries(data.providers.map((item: ImportedProvider) => [item.id, '']))
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  }
+}
+
+async function confirmImport() {
+  const data = importData.value
+  if (!data) return
+  busy.value = 'save'
+  error.value = ''
+  try {
+    const providers = data.providers.map((item) => {
+      const key = (importKeys.value[item.id] || '').trim()
+      return {
+        id: item.id,
+        name: item.name,
+        provider: item.provider || 'custom',
+        base_url: item.base_url || '',
+        credential_mode: item.credential_mode || 'api_key',
+        // null 表示"保留本机原有密钥"；传空字符串会把它删掉，所以这里不能直接给 ''
+        api_key: key || null,
+        timeout_seconds: item.timeout_seconds ?? 90,
+        models: (item.models || []).map((model) => ({
+          id: model.id,
+          name: model.name || model.id,
+          api: model.api || 'openai-completions',
+          context_window: model.context_window ?? 32768,
+          max_tokens: model.max_tokens ?? 8192,
+          reasoning: !!model.reasoning,
+          supports_images: !!model.supports_images,
+        })),
+      }
+    })
+    await api('/system/model-registry', {
+      method: 'PUT',
+      body: JSON.stringify({ providers, active: data.active }),
+    })
+    importData.value = null
+    await load()
+    emit('saved', stored.value!.current)
+    feedback.value = '配置已导入'
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    busy.value = ''
+  }
+}
+
 async function load() {
   if (busy.value || dirty.value) return
   loading.value = true; loadError.value = ''
@@ -410,8 +520,31 @@ onUnmounted(() => {
     <form ref="panel" class="management-dialog model-settings provider-settings" role="dialog" aria-modal="true" aria-labelledby="model-settings-title" tabindex="-1" @submit.prevent="submit('save')">
       <header class="model-dialog-header">
         <div><h2 id="model-settings-title">模型配置</h2><p class="muted">保存服务商连接，为复习选择合适的模型</p></div>
-        <button type="button" class="icon-button" aria-label="关闭模型配置" :disabled="!!busy" @click="requestClose">×</button>
+        <div class="model-header-tools">
+          <button type="button" class="text-button" :disabled="!!busy || loading || !stored" @click="exportConfig">导出配置</button>
+          <label class="text-button model-import-label" :class="{ disabled: !!busy || loading }">
+            导入配置
+            <input type="file" accept="application/json,.json" hidden :disabled="!!busy || loading" @change="onImportFile" />
+          </label>
+          <button type="button" class="icon-button" aria-label="关闭模型配置" :disabled="!!busy" @click="requestClose">×</button>
+        </div>
       </header>
+      <div v-if="importData" class="model-import-panel" role="region" aria-label="导入模型配置">
+        <p class="model-import-title">从文件读到 {{ importData.providers.length }} 个服务商，确认后写入本机：</p>
+        <div v-for="item in importData.providers" :key="item.id" class="model-import-row">
+          <div class="model-import-meta">
+            <strong>{{ item.name }}</strong>
+            <small>{{ item.base_url || '未填地址' }}</small>
+          </div>
+          <input v-if="item.needs_api_key" v-model="importKeys[item.id]" type="password" autocomplete="off"
+                 :placeholder="`粘贴 ${item.name} 的密钥（留空则沿用本机现有）`" />
+          <small v-if="item.needs_headers" class="model-import-note">原配置带自定义请求头，出于安全没导出，导入后请手动补</small>
+        </div>
+        <div class="model-import-actions">
+          <button type="button" class="button primary small" :disabled="!!busy" @click="confirmImport">{{ busy ? '导入中…' : '确认导入' }}</button>
+          <button type="button" class="text-button" :disabled="!!busy" @click="importData = null">取消</button>
+        </div>
+      </div>
       <div class="model-live"><span class="model-status-dot" :class="{ connected: stored?.current.configured }" aria-hidden="true"></span><div><small>正在使用</small><strong>{{ loading ? '正在读取…' : stored?.current.configured ? `${stored.current.provider_name} / ${stored.current.model_name || stored.current.model}` : '尚未接入模型' }}</strong></div><span v-if="dirty" class="model-draft-tag">有未保存修改</span></div>
       <div v-if="loadError" class="model-load-error" role="alert"><p>{{ loadError }}</p><button type="button" class="button subtle small" :disabled="loading" @click="load">重新读取配置</button></div>
       <p v-if="loading" class="model-loading" role="status">正在读取本机配置…</p>
@@ -508,6 +641,19 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.model-header-tools { display: flex; align-items: center; gap: 10px; }
+.model-import-label { cursor: pointer; }
+.model-import-label.disabled { opacity: .5; cursor: not-allowed; }
+.model-import-panel { margin: 0 0 12px; padding: 12px 14px; border: 1px solid var(--accent-line); border-radius: 10px; background: var(--soft); }
+.model-import-title { margin: 0 0 8px; font-size: 12.5px; color: var(--ink); }
+.model-import-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 7px 0; border-top: 1px dashed var(--line); }
+.model-import-meta { display: flex; flex-direction: column; min-width: 180px; }
+.model-import-meta strong { font-size: 12.5px; }
+.model-import-meta small { font-size: 11px; color: var(--muted); }
+.model-import-row input { flex: 1; min-width: 220px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; font-size: 12.5px; }
+.model-import-note { flex-basis: 100%; font-size: 11px; color: var(--warning); }
+.model-import-actions { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+
 .provider-settings { width: min(1040px, 100%); height: min(900px, calc(100dvh - 48px)); min-height: 0; padding: 0; display: flex; flex-direction: column; overflow: hidden; }
 .model-dialog-header, .model-live, .model-dialog-footer { flex-shrink: 0; }
 .model-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 24px 28px 18px; }
