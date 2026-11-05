@@ -139,6 +139,44 @@ npm start --prefix desktop            # 开发模式启动
 
 重建桌面图标：`uv run python scripts/make_app_assets.py`
 
+
+## 构建安装包
+
+```bash
+python scripts/prepare_runtime.py      # 组装可重定位 Python（约 460MB，20 秒）
+npm install --prefix desktop           # 装 electron-builder
+npx --prefix desktop electron-builder --win nsis
+```
+
+产物在 `_package/dist/`：`课脉 Setup 0.1.0.exe`（约 217MB）与 `win-unpacked/`（免安装目录）。
+
+### 为什么不用 .venv 打包
+
+Windows 的 venv 在 `pyvenv.cfg` 里写死了 `home = C:\Users\...\uv\python\...`，
+**换一台机器那个路径就不存在，整个环境作废**。
+
+所以 `prepare_runtime.py` 改成组装一份可重定位运行时：
+
+```
+基础解释器（python-build-standalone，按相对路径找标准库）
+  + site-packages 直接合并进去（不做 venv、不写 pyvenv.cfg）
+  + 清掉指向旧路径的 .pth
+```
+
+已实测：把装好的目录整体复制到 `%TEMP%` 后，`sys.prefix` 变成新路径，
+依赖照常导入，后端与界面正常启动。**这是安装包能发给别人的前提。**
+
+### 打包内容
+
+```
+resources/
+  app.asar           Electron 主进程
+  python/            可重定位 Python + 依赖
+  backend/           FastAPI 后端
+  frontend/dist/     前端构建产物
+  assets/  decks/    图标与演示课件
+```
+
 ## 从源码运行
 
 需要 Python 3.11、[uv](https://docs.astral.sh/uv/) 0.11.7+、Node.js 22.19+；解析 DOC/PPT/RTF 另需 JDK 11+（只用 PDF/DOCX/PPTX/图片时可加 `-SkipTika` 跳过）。
