@@ -269,6 +269,66 @@ async function boot() {
     fs.mkdirSync(path.dirname(SHOT_PATH), { recursive: true });
     fs.writeFileSync(SHOT_PATH, image.toPNG());
     console.log('SELFTEST_OK ' + SHOT_PATH);
+
+    // KEMAI_SHOT_JS points at a small script run inside the page before each
+    // capture. Some panels need one interaction first (picking a practice set,
+    // opening a citation card) that clicking the sidebar alone cannot do.
+    const pageScript = process.env.KEMAI_SHOT_JS && fs.existsSync(process.env.KEMAI_SHOT_JS)
+      ? fs.readFileSync(process.env.KEMAI_SHOT_JS, 'utf8')
+      : '';
+
+    // KEMAI_SHOT_PAGES lets the README screenshots be regenerated from the
+    // real UI: "资料库=library,复习笔记=notes@320" clicks each sidebar entry in
+    // turn, scrolls the main column by the optional pixel offset, and writes
+    // <dir>/<name>.png next to SHOT_PATH.
+    for (const spec of (process.env.KEMAI_SHOT_PAGES || '').split(',').map((s) => s.trim()).filter(Boolean)) {
+      const [label, target] = spec.split('=');
+      const [name, scroll] = (target || '').split('@');
+      const clicked = await win.webContents.executeJavaScript(`(() => {
+        const target = ${JSON.stringify(label)};
+        const hit = Array.from(document.querySelectorAll('nav.main-nav button.nav-item'))
+          .find((button) => (button.textContent || '').trim() === target);
+        if (!hit) return false;
+        hit.click();
+        return true;
+      })()`);
+      log(`截图 ${label} → ${name}.png（${clicked ? '已切换' : '没找到该导航项'}）`);
+      if (!clicked) continue;
+      await new Promise((resolve) => setTimeout(resolve, Number(process.env.KEMAI_SHOT_WAIT || 2500)));
+      if (pageScript) {
+        try {
+          const result = await win.webContents.executeJavaScript(pageScript);
+          log(`  页面脚本执行结果：${JSON.stringify(result)}`);
+        } catch (error) {
+          log(`  页面脚本失败：${error.message}`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, Number(process.env.KEMAI_SHOT_JS_WAIT || 1500)));
+      }
+      if (Number(scroll)) {
+        const moved = await win.webContents.executeJavaScript(`(() => {
+          const offset = ${Number(scroll)};
+          const candidates = [document.scrollingElement, ...document.querySelectorAll('main, main *, .main-content, .main-content *')];
+          let best = null;
+          for (const element of candidates) {
+            if (!element || element.scrollHeight <= element.clientHeight + 20) continue;
+            const style = getComputedStyle(element);
+            if (style.overflowY === 'hidden' || style.overflowY === 'clip') continue;
+            if (element.clientHeight < 300) continue;
+            if (!best || element.clientHeight > best.clientHeight) best = element;
+          }
+          if (!best) return 0;
+          best.scrollTop = offset;
+          return best.scrollTop;
+        })()`);
+        log(`  滚动 ${moved}px`);
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+      const shot = await win.webContents.capturePage();
+      const path_ = path.join(path.dirname(SHOT_PATH), `${name}.png`);
+      fs.writeFileSync(path_, shot.toPNG());
+      console.log('SHOT_OK ' + path_);
+    }
+
     quitting = true;
     stopBackend();
     app.quit();

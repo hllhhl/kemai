@@ -1,4 +1,5 @@
 import json
+import logging
 import queue
 import re
 import shutil
@@ -8,7 +9,7 @@ from contextvars import copy_context
 from dataclasses import asdict
 from functools import lru_cache
 from threading import Thread
-from time import monotonic
+from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 
@@ -23,6 +24,42 @@ from .token_usage import call_stage, record_usage
 MAX_TOTAL_SECONDS = 30 * 60
 # Independent calls of one task run together; a small bound avoids provider rate limits.
 MODEL_CONCURRENCY = 3
+
+# Transient provider failures get retried before the user sees an error. Relay
+# gateways commonly answer 500 once and 200 on the immediate next call, so a
+# silent retry is worth far more than asking the user to press the button again.
+MAX_ATTEMPTS = 5
+# Waits between attempts; the last value repeats if MAX_ATTEMPTS grows.
+RETRY_BACKOFF = (0.8, 1.6, 3.2, 6.4)
+# 408/425/429 are throttling or stalled requests; 5xx covers gateways that fall
+# over under load. 520-524 are Cloudflare's origin-error range.
+RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524})
+
+log = logging.getLogger(__name__)
+
+
+def retryable(error: Exception) -> bool:
+    """Whether repeating the same request could plausibly succeed.
+
+    Credential, quota and protocol errors are deliberately excluded: retrying
+    a wrong key or an unknown model only wastes the user's time.
+    """
+    for kind in (ModelImageNotSupported, StructuredOutputError, ModelNotConfigured):
+        if isinstance(error, kind):
+            return False
+    status = getattr(error, "status_code", None)
+    if status is not None:
+        return status in RETRYABLE_STATUS or 500 <= status < 600
+    if getattr(error, "timed_out", False):
+        return True
+    # No status at all means the request never completed: bridge crash,
+    # DNS failure, connection reset. Those are worth another attempt.
+    return isinstance(error, ModelRuntimeError) or type(error).__name__ == "APIConnectionError"
+
+
+def backoff_seconds(attempt: int) -> float:
+    """Wait before attempt number ``attempt + 1`` (1-based attempt just failed)."""
+    return RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)]
 
 
 def run_parallel(function, items, workers=MODEL_CONCURRENCY):
@@ -84,13 +121,15 @@ def model_failure_message(error: Exception) -> str:
         if status == 404:
             return "模型或接口不存在（HTTP 404）。请在“模型配置”中检查模型名称、协议和接口根地址。"
         if status == 429:
-            return "模型服务限流或额度受限（HTTP 429）。请检查服务商额度，稍后重试。"
+            return f"模型服务限流或额度受限（HTTP 429），已自动重试 {MAX_ATTEMPTS} 次仍未恢复。请稍后再试或更换模型配置。"
+        if status is not None and 500 <= status < 600:
+            return f"模型服务端出错（HTTP {status}），已自动重试 {MAX_ATTEMPTS} 次仍未恢复。这类错误多来自中转网关，可稍后再试或改用其他接口。"
         if getattr(current, "timed_out", False) or type(current).__name__ == "APITimeoutError":
-            return "模型长时间没有返回新内容，请求已超时。请稍后重试，或在“模型配置”中增加请求超时。"
+            return f"模型长时间没有返回新内容，已自动重试 {MAX_ATTEMPTS} 次仍超时。请稍后重试，或在“模型配置”中增加请求超时。"
         if isinstance(current, ModelRuntimeError):
             return str(current)
         if type(current).__name__ == "APIConnectionError":
-            return "无法连接模型服务。请检查页面中的接口地址和网络后重试。"
+            return f"无法连接模型服务，已自动重试 {MAX_ATTEMPTS} 次仍失败。请检查页面中的接口地址和网络后重试。"
         current = current.__cause__ or current.__context__
     return "模型调用失败，请检查模型配置或后端日志。"
 
@@ -172,6 +211,10 @@ class ModelClient:
                         safe_message = ("订阅模型调用失败，请尝试重新登录，并确认账号的模型权限与额度。"
                             if request.get("config", {}).get("credential_mode") == "oauth"
                             else "模型请求失败。请检查模型配置、网络和服务商额度。")
+                        # The status code is safe to show and tells a retry log
+                        # apart from a permanently broken configuration.
+                        if status:
+                            safe_message = f"{safe_message}（HTTP {status}）"
                     raise ModelRuntimeError(safe_message, status, event.get("timeout", False), request.get("config", {}).get("credential_mode"))
                 terminal = event.get("type") in ("done", "catalog") or terminal
                 yield event
@@ -205,21 +248,34 @@ class ModelClient:
         if config.api_key:
             headers["Authorization"] = f"Bearer {config.api_key}"
         request = Request(config.base_url.rstrip("/") + "/models", headers=headers)
-        try:
+
+        def fetch():
             # Never forward a credential to another endpoint via a redirect.
             with build_opener(NoRedirect).open(request, timeout=min(config.timeout_seconds, 30)) as response:
-                data = response.read(4 * 1024 * 1024 + 1)
-            if len(data) > 4 * 1024 * 1024:
+                body = response.read(4 * 1024 * 1024 + 1)
+            if len(body) > 4 * 1024 * 1024:
                 raise ModelRuntimeError("服务返回的模型列表过大，请手动填写模型 ID。")
-            body = json.loads(data)
-        except HTTPError as exc:
-            if exc.code in (404, 405):
-                raise ModelRuntimeError("服务没有提供 /models 列表接口，请从内置目录添加或手动填写模型 ID。") from exc
-            raise ModelRuntimeError("无法获取模型列表。", status_code=exc.code) from exc
-        except (URLError, TimeoutError) as exc:
-            raise ModelRuntimeError("无法连接模型列表接口，请检查地址和网络。") from exc
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ModelRuntimeError("模型列表接口未返回有效 JSON，请手动填写模型 ID。") from exc
+            return json.loads(body)
+
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                body = fetch()
+                break
+            except HTTPError as exc:
+                if exc.code in (404, 405):
+                    raise ModelRuntimeError("服务没有提供 /models 列表接口，请从内置目录添加或手动填写模型 ID。") from exc
+                error = ModelRuntimeError("无法获取模型列表。", status_code=exc.code)
+                if attempt == MAX_ATTEMPTS or not retryable(error):
+                    raise error from exc
+            except (URLError, TimeoutError) as exc:
+                error = ModelRuntimeError("无法连接模型列表接口，请检查地址和网络。")
+                if attempt == MAX_ATTEMPTS or not retryable(error):
+                    raise error from exc
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                raise ModelRuntimeError("模型列表接口未返回有效 JSON，请手动填写模型 ID。") from exc
+            wait = backoff_seconds(attempt)
+            log.warning("获取模型列表失败（第 %s/%s 次）；%.1f 秒后重试", attempt, MAX_ATTEMPTS, wait)
+            sleep(wait)
         items = body.get("data") if isinstance(body, dict) else None
         if not isinstance(items, list):
             raise ModelRuntimeError("服务返回的模型列表格式不受支持，请手动填写模型 ID。")
@@ -237,11 +293,38 @@ class ModelClient:
             request["max_tokens"] = max_tokens
         return self._usage_events(request, config.timeout_seconds)
 
+    def _attempts(self, request, timeout):
+        """Yield events, retrying failures that happened before any content arrived.
+
+        Once text has been produced a retry would replay half an answer, so the
+        decision is made on what already reached the caller: only ``delta``,
+        ``done`` and ``catalog`` count as output. A ``usage`` event before the
+        stream dies is the one case that can be counted twice, which costs an
+        inflated token figure but never a corrupted answer.
+        """
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            produced = False
+            try:
+                for event in self._events(request, timeout):
+                    if event.get("type") in ("delta", "done", "catalog"):
+                        produced = True
+                    yield event
+                return
+            except Exception as error:  # noqa: BLE001 - re-raised below when not retryable
+                if produced or attempt == MAX_ATTEMPTS or not retryable(error):
+                    raise
+                wait = backoff_seconds(attempt)
+                log.warning(
+                    "模型请求失败（第 %s/%s 次）：%s；%.1f 秒后重试",
+                    attempt, MAX_ATTEMPTS, error, wait,
+                )
+                sleep(wait)
+
     def _usage_events(self, request, timeout):
         stage = call_stage(request["messages"], request["action"])
         reported = False
         try:
-            for event in self._events(request, timeout):
+            for event in self._attempts(request, timeout):
                 if event.get("type") == "usage":
                     record_usage(event.get("usage"), stage)
                     CALIBRATION.record(request["config"], request["messages"], (event.get("usage") or {}).get("input_tokens"))
