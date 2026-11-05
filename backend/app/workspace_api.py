@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from sqlalchemy import select
 
-from . import agent_runtime
+from . import agent_runtime, course_tools
 from . import importers
 from . import skills as skill_store
 from .concierge import plan as build_plan
@@ -79,6 +79,8 @@ class AgentResumeInput(BaseModel):
 
 
 def register_workspace_routes(app, services) -> None:
+    # 课程工具要查库，这里把 Services 交给它；不写进模块级全局变量是为了让测试能换掉
+    course_tools.bind(services)
     @app.get("/workspace/overview")
     def workspace_overview(probe: bool = True):
         """MCP 服务器 + 技能清单。
@@ -258,13 +260,29 @@ def register_workspace_routes(app, services) -> None:
     # ── Agent：模型自己选工具、自己调 ─────────────────────
     @app.post("/agent/run")
     def agent_run(payload: AgentStartInput):
-        """跑一次 agent 循环。
+        """一次性版：内部就是消费 stream 的事件，跑完把最终状态返回。
 
-        和「新建任务」的区别：任务是把一句话拆成预先定义好的几个动作；
-        agent 是模型看结果再决定下一步，能处理"先查一下再决定"这类事。
-        走到需要确认的工具时会停下来，返回 status=blocked。
+        不另写一套循环——同步和流式共用 _turn，否则改了一边忘了另一边，
+        表现就是"界面里会停下来的工具，脚本调用时不问就跑了"。
         """
-        return agent_runtime.start(services.llm, payload.goal, payload.course_id, payload.max_turns)
+        from . import agent_runtime as runtime
+
+        run_id = ""
+        pending = None
+        answer = ""
+        for event in runtime.stream(services.llm, payload.goal, payload.course_id, payload.max_turns):
+            if event["type"] == "run":
+                run_id = event["run_id"]
+            elif event["type"] == "blocked":
+                pending = event["pending"]
+            elif event["type"] == "final":
+                answer = event["answer"]
+            elif event["type"] == "error":
+                answer = event["message"]
+        try:
+            return runtime.get_run(run_id).public()
+        except KeyError:
+            return {"id": run_id, "status": "failed", "answer": answer, "steps": [], "pending": pending}
 
     @app.post("/agent/stream")
     def agent_stream(payload: AgentStartInput):

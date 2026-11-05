@@ -210,3 +210,26 @@ def test_stream_without_model_emits_error_once():
 
     events = list(agent_runtime.stream(Cold(), "随便"))
     assert [e["type"] for e in events] == ["run", "error"]
+
+
+def test_kemai_tools_route_to_course_tools(monkeypatch):
+    """内置课程工具不能被当成 MCP 工具去起子进程找服务器。"""
+    catalog = [{"name": "kemai.course_brief", "server": "kemai", "tool": "course_brief",
+                "description": "看课程", "read_only": True, "destructive": False, "schema": {}}]
+    monkeypatch.setattr(agent_runtime, "tool_catalog", lambda probe=False: catalog)
+    called: list[tuple[str, dict]] = []
+    monkeypatch.setattr(agent_runtime.course_tools, "call",
+                        lambda name, args, course_id: (called.append((name, course_id)) or {"ok": True, "text": "课程：数据结构"}))
+
+    def boom(*_a, **_k):
+        raise AssertionError("不该走 MCP 调用路径")
+
+    monkeypatch.setattr(agent_runtime, "call_tool", boom)
+
+    llm = FakeLLM([
+        {"action": "tool", "tool": "kemai.course_brief", "args": {}},
+        {"action": "final", "answer": "看完了"},
+    ])
+    events = list(agent_runtime.stream(llm, "看课程", course_id="course-1"))
+    assert events[-1]["type"] == "final"
+    assert called == [("kemai.course_brief", "course-1")]

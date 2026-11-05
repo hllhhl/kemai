@@ -6,7 +6,7 @@ type Tool = { name: string; description: string; read_only: boolean; destructive
 type Server = { name: string; disabled: boolean; command: string; tools: Tool[]; error: string; version: string }
 type Skill = { name: string; description: string; path: string; chars: number; agent_created: boolean }
 
-const props = defineProps<{ open: boolean }>()
+const props = defineProps<{ open: boolean; courseId?: string }>()
 const emit = defineEmits<{ close: [] }>()
 
 const tab = ref<'mcp' | 'skills' | 'agent'>('mcp')
@@ -121,6 +121,20 @@ const agentGoal = ref('')
 const agentRun = ref<AgentRun | null>(null)
 const agentBusy = ref(false)
 const tools = ref<{ name: string; description: string; read_only: boolean }[]>([])
+// 关掉弹窗时要能掐断请求：agent 一次跑几十秒，用户关了它还接着烧额度
+let controller: AbortController | null = null
+
+function stopAgent() {
+  controller?.abort()
+  controller = null
+  agentBusy.value = false
+  if (agentRun.value && agentRun.value.status === 'running') agentRun.value.status = 'failed'
+  if (agentRun.value) agentRun.value.answer = agentRun.value.answer || '已停止'
+}
+
+watch(() => props.open, (open) => { if (!open) stopAgent() })
+
+watch(() => props.open, (open) => { if (!open) stopAgent() })
 
 function handleAgentEvent(event: { type: string; [key: string]: unknown }) {
   const run = agentRun.value
@@ -151,10 +165,12 @@ async function startAgent() {
   // 先放一个空壳，事件一到就往里填——否则第一轮模型调用那 10 秒界面是空的
   agentRun.value = { id: '', status: 'running', answer: '', steps: [], pending: null, turn: 0, max_turns: 6 }
   try {
+    controller = new AbortController()
     const response = await fetch(`${API_BASE}/agent/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ goal: agentGoal.value.trim(), max_turns: 6 }),
+      body: JSON.stringify({ goal: agentGoal.value.trim(), course_id: props.courseId || '', max_turns: 6 }),
+      signal: controller.signal,
     })
     if (!response.ok) throw new Error(`请求失败（${response.status}）`)
     if (!response.body) throw new Error('浏览器不支持流式响应')
@@ -180,9 +196,15 @@ async function startAgent() {
       }
     }
   } catch (e) {
-    importError.value = e instanceof Error ? e.message : String(e)
-    if (agentRun.value) agentRun.value.status = 'failed'
+    // 主动停止不算错误，别弹红字
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      if (agentRun.value) agentRun.value.status = 'failed'
+    } else {
+      importError.value = e instanceof Error ? e.message : String(e)
+      if (agentRun.value) agentRun.value.status = 'failed'
+    }
   } finally {
+    controller = null
     agentBusy.value = false
   }
 }
@@ -463,7 +485,8 @@ watch(() => props.open, (value) => {
           </div>
           <textarea v-model="agentGoal" rows="3" class="ws-skill-text" placeholder="例如：用 ltspice 看看现在有哪些电路分组，把名字列出来"></textarea>
           <div class="ws-import-actions">
-            <button class="button primary small" :disabled="agentBusy || !agentGoal.trim()" @click="startAgent">{{ agentBusy ? '运行中…' : '开始' }}</button>
+            <button v-if="!agentBusy" class="button primary small" :disabled="!agentGoal.trim()" @click="startAgent">开始</button>
+            <button v-else class="button subtle small danger" @click="stopAgent">停止</button>
             <span class="ws-tools-count">可用工具 {{ tools.length }} 个</span>
           </div>
         </section>

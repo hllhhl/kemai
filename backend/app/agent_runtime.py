@@ -25,6 +25,7 @@ import time
 import uuid
 from typing import Any
 
+from . import course_tools
 from .mcp_client import McpError, hub
 from .sentinel import ALLOW, ASK, DENY, sentinel
 
@@ -41,6 +42,11 @@ SYSTEM = """你是一个会用工具的课程助手。每一步只输出一个 J
 {"action": "skill_use", "name": "技能名"}
 {"action": "tool", "tool": "服务器.工具名", "args": {...}}
 {"action": "final", "answer": "给用户的回答"}
+
+调工具的完整形状（tool 必须写全 "服务器.工具"，args 必须是对象）：
+{"action": "tool", "tool": "kemai.course_brief", "args": {}}
+
+注意：action 只能是上面五个值之一，"kemai.course_brief" 这类是 tool 的名字，不是 action。
 
 规则：
 - 先想清楚缺什么信息，再决定调哪个工具；能直接回答就别调。
@@ -132,6 +138,10 @@ def tool_catalog(probe: bool = False) -> list[dict]:
                 "destructive": bool(tool.get("destructive")),
                 "schema": tool.get("schema") or {},
             })
+
+    # 课程工具和 MCP 工具放在同一张清单里：模型不用知道哪个是外挂、哪个是内置，
+    # 它只需要知道"想查课程结构该调哪个"。
+    catalog.extend(course_tools.catalog())
     return catalog
 
 
@@ -170,6 +180,12 @@ def _assess(tool_name: str, catalog: list[dict]) -> dict:
 
     kind = "delete" if entry["destructive"] else ("finder" if entry["read_only"] else "practice")
     verdict = sentinel().assess({"type": kind})
+    if tool_name.startswith("kemai."):
+        # 内置工具的风险是固定的（写死在这里），不像 MCP 那样靠 annotations 自报
+        verdict = {
+            **verdict,
+            "reason": "只读课程数据" if entry["read_only"] else "会生成文件，但不动已有内容",
+        }
     if entry["destructive"]:
         verdict = {**verdict, "risk": "sensitive", "decision": ASK, "reason": "这个工具会改动或删除内容"}
     return {**verdict, "read_only": entry["read_only"]}
@@ -274,7 +290,10 @@ def _turn(run: AgentRun, llm) -> str:
                            "risk": verdict["risk"], "reason": verdict["reason"]}
             return "blocked"
 
-        result = call_tool(tool_name, args)
+        if tool_name.startswith("kemai."):
+            result = course_tools.call(tool_name, args, run.course_id)
+        else:
+            result = call_tool(tool_name, args)
         run.steps[-1].update({"ok": result["ok"], "output": result["text"][:400]})
         _observe(run, tool_name, result["text"])
         return "continue"

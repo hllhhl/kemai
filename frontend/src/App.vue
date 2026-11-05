@@ -506,7 +506,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
     <ModelSettings v-if="modelSettingsOpen" :active="spaceBusy || chatting || !!activeJob || practiceModelBusy" @close="modelSettingsOpen = false" @saved="refreshHealth" />
     <ManagementDialog v-if="management" :key="`${management.action}:${management.id}`" :title="management.title" :description="management.description" :initial-name="management.initialName" :confirm-text="management.confirmText" :danger="management.danger" :busy="managementBusy" :error="managementError" @close="management = null" @submit="submitManagement" />
     <BiliLoginDialog :open="biliLoginOpen" @close="biliLoginOpen = false" @changed="refreshBiliStatus" />
-    <WorkspaceDialog :open="workspaceOpen" @close="workspaceOpen = false" />
+    <WorkspaceDialog :open="workspaceOpen" :course-id="courseId" @close="workspaceOpen = false" />
     <ConciergeDock
       v-if="!initialLoading"
       :course-id="courseId"
