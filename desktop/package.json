@@ -46,9 +46,7 @@
         "to": "model-runtime",
         "filter": [
           "**/*",
-          "!**/.cache/**",
-          "!**/*.map",
-          "!**/*.md"
+          "**/node_modules/**/*"
         ]
       },
       {
@@ -81,6 +79,7 @@
       "createStartMenuShortcut": true,
       "shortcutName": "课脉"
     },
-    "asar": true
+    "asar": true,
+    "afterPack": "after-pack.js"
   }
 }
