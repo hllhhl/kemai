@@ -1,10 +1,12 @@
 from contextlib import asynccontextmanager
 import hashlib
 import logging
+import os
 import re
 from pathlib import Path
 from threading import Lock
 import sys
+import threading
 from typing import Literal
 from urllib.parse import quote
 
@@ -313,6 +315,33 @@ def require(db, model, identity):
     if result is None:
         raise HTTPException(404, "未找到该记录")
     return result
+
+
+def _watch_parent_process() -> None:
+    """父进程（Electron）消失后自己退出。
+
+    Electron 被任务管理器强行结束时来不及走 before-quit，后端就会留下来占着 8000。
+    下次启动虽然会复用，但那是旧进程，改过的代码不生效——排查起来很费劲。
+    这里每 3 秒看一眼父进程还在不在，不在就退。
+    """
+    parent = os.getenv("KEMAI_PARENT_PID", "")
+    if not parent.isdigit() or os.name != "nt":
+        return
+
+    def watch() -> None:
+        import ctypes
+        import time
+
+        kernel32 = ctypes.windll.kernel32
+        synchronize = 0x00100000
+        while True:
+            time.sleep(3)
+            handle = kernel32.OpenProcess(synchronize, False, int(parent))
+            if not handle:
+                os._exit(0)  # 父进程没了，直接退，别再等 uvicorn 的优雅关闭
+            kernel32.CloseHandle(handle)
+
+    threading.Thread(target=watch, name="parent-watch", daemon=True).start()
 
 
 def create_app(settings: Settings | None = None, embedder=None, llm=None):
@@ -1269,6 +1298,7 @@ def create_app(settings: Settings | None = None, embedder=None, llm=None):
     register_finder_routes(app, services)
     # 工作区：MCP 工具 + 技能包
     register_workspace_routes(app, services)
+    _watch_parent_process()
 
     # 桌面端（Electron）只需要一个进程：后端顺带把已构建的界面托管在同一个端口。
     # 必须放在所有 API 路由之后、且挂在 "/"，否则会把接口吃掉。

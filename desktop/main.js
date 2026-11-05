@@ -10,7 +10,7 @@
  * 不需要 vite dev server，也不需要开浏览器。
  */
 
-const { app, BrowserWindow, Menu, dialog, shell } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, dialog, shell } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -40,6 +40,8 @@ function sinceStart() { return ((Date.now() - T0) / 1000).toFixed(2) + 's'; }
 
 let backend = null;
 let win = null;
+let tray = null;
+let trayHintShown = false;
 let quitting = false;
 
 // 装在 Program Files 时安装目录不可写，日志必须落在 userData
@@ -106,7 +108,12 @@ function startBackend() {
       stdio: ['ignore', 'pipe', 'pipe'],
       // 国内直连 huggingface.co 会超时，嵌入模型根本下不下来。
       // 指到镜像后首次约 30 秒下完，之后走缓存。
-      env: { ...process.env, HF_ENDPOINT: process.env.HF_ENDPOINT || 'https://hf-mirror.com' },
+      env: {
+        ...process.env,
+        HF_ENDPOINT: process.env.HF_ENDPOINT || 'https://hf-mirror.com',
+        // 后端靠这个每隔几秒确认父进程还在，被强杀时能自己收尾，不留孤儿占端口
+        KEMAI_PARENT_PID: String(process.pid),
+      },
     },
   );
   backend.stdout.on('data', (chunk) => log(String(chunk).trim()));
@@ -133,6 +140,35 @@ function stopBackend() {
     log('结束后端失败', error.message);
   }
   backend = null;
+}
+
+// ── 托盘 ────────────────────────────────────────────────
+// 关窗不退出：进程留住后端，下次点图标就是秒开（不用再等 5 秒起 Python）。
+// 真要退出走托盘右键菜单，那条路径才会 stopBackend。
+function showWindow() {
+  if (!win || win.isDestroyed()) {
+    createWindow();
+    return;
+  }
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+}
+
+function createTray() {
+  if (tray) return;
+  const source = fs.existsSync(ICON) ? nativeImage.createFromPath(ICON) : nativeImage.createEmpty();
+  // 托盘是 16px 的位置，直接塞 256px 会糊
+  tray = new Tray(source.isEmpty() ? source : source.resize({ width: 16, height: 16 }));
+  tray.setToolTip('课脉 · 课程知识体系');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '打开课脉', click: showWindow },
+    { type: 'separator' },
+    { label: '退出课脉', click: () => { quitting = true; app.quit(); } },
+  ]));
+  tray.on('click', showWindow);
+  log('托盘已就绪');
+  tray.on('double-click', showWindow);
 }
 
 function createWindow() {
@@ -165,9 +201,27 @@ html,body{height:100%;margin:0;background:#f4f6fb;color:#24324b;
 .mark{width:64px;height:64px;border-radius:14px;background:#3455db;color:#fff;
   display:flex;align-items:center;justify-content:center;font-size:34px;font-weight:700}
 .t{font-size:15px;font-weight:600}.s{color:#66738a;font-size:12.5px}
-</style></head><body><div class="mark">课</div><div class="t">课脉</div><div class="s">正在启动本地服务，通常 3–5 秒…</div></body></html>`));
+</style></head><body><div class="mark"><svg width="36" height="36" viewBox="0 0 36 40" fill="none"><circle cx="6" cy="20" r="3" fill="#fff"/><path d="M9 20h6M15 20l13-9M15 20h13M15 20l13 9" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="t">课脉</div><div class="s">正在启动本地服务，通常 3–5 秒…</div></body></html>`));
 
   win.once('ready-to-show', () => { win.show(); win.focus(); });
+
+  // 点 × 只是收起：后端继续活着，下次唤出来是热的
+  win.on('close', (event) => {
+    if (quitting) return;
+    event.preventDefault();
+    win.hide();
+    if (!trayHintShown) {
+      trayHintShown = true;
+      try {
+        tray?.displayBalloon({
+          title: '课脉仍在后台运行',
+          content: '点托盘图标可以重新打开；要彻底退出请右键托盘图标。',
+        });
+      } catch {
+        /* 有些 Windows 版本不支持气泡，忽略即可 */
+      }
+    }
+  });
 
   // 站内链接留在窗口里，外部链接交给系统浏览器
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -225,12 +279,15 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (win) { if (win.isMinimized()) win.restore(); win.focus(); }
+    // 第二次双击图标：单实例锁让它立刻退出，这里负责把已有窗口唤出来
+    log('已有实例在运行，唤回窗口');
+    showWindow();
   });
 
   app.whenReady().then(() => {
     openLog();
     log('Electron 就绪');
+    createTray();
     boot().catch((error) => {
       const message = String(error && error.message ? error.message : error);
       console.error('[课脉] 启动异常：' + message);
@@ -241,7 +298,9 @@ if (!app.requestSingleInstanceLock()) {
     });
   });
 
-  app.on('window-all-closed', () => { quitting = true; stopBackend(); app.quit(); });
+  // 有托盘时关窗只是隐藏，窗口没被销毁，这个事件不会触发；
+  // 留着是为了走真正的退出路径（托盘菜单 / 启动失败）时能干净收尾。
+  app.on('window-all-closed', () => { if (quitting) { stopBackend(); app.quit(); } });
   app.on('before-quit', () => { quitting = true; stopBackend(); });
   process.on('exit', stopBackend);
 }
