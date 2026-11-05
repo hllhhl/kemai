@@ -37,3 +37,6 @@ bili-session.json
 desktop/node_modules/
 _package/
 _runtime/
+
+# 图标设计源稿（生成物，成品已入库为 assets/kemai.ico 与 assets/icon-1024.png）
+assets/icons-src/

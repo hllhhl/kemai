@@ -188,6 +188,26 @@ class Job(Base):
     created_at: Mapped[str] = mapped_column(String, default=now)
 
 
+class Task(Base):
+    """用户发起的一次"任务"：一句话 + 计划快照 + 执行结果。
+
+    和 Job 的区别：Job 是笔记生成这一种后台作业的内部状态；
+    Task 是用户视角的"我让它干了什么"，可能包含多个动作（笔记 + 出题）。
+    产物仍然落在各自的地方，Task 只记引用，不复制内容。
+    """
+
+    __tablename__ = "tasks"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=new_id)
+    course_id: Mapped[str] = mapped_column(ForeignKey("courses.id"), index=True)
+    title: Mapped[str] = mapped_column(String)
+    message: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String, default="planned")
+    plan: Mapped[str] = mapped_column(Text, default="{}")
+    result: Mapped[str] = mapped_column(Text, default="[]")
+    created_at: Mapped[str] = mapped_column(String, default=now, index=True)
+    updated_at: Mapped[str] = mapped_column(String, default=now)
+
+
 class AppMeta(Base):
     __tablename__ = "app_meta"
     key: Mapped[str] = mapped_column(String, primary_key=True)

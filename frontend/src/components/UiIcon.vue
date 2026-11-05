@@ -1,5 +1,5 @@
 <script setup lang="ts">
-type IconName = 'library' | 'outline' | 'space' | 'practice' | 'wrong' | 'finder' | 'settings' | 'upload' | 'chat'
+type IconName = 'library' | 'outline' | 'space' | 'practice' | 'wrong' | 'finder' | 'task' | 'settings' | 'upload' | 'chat'
 defineProps<{ name: IconName }>()
 const paths: Record<IconName, string> = {
   library: 'M4 4h5v16H4z M9 7h5v13H9z M17 4l4 15-4 1-4-15z',
@@ -11,6 +11,7 @@ const paths: Record<IconName, string> = {
   upload: 'M12 16V3 M7 8l5-5 5 5 M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4',
   chat: 'M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 3V6a2 2 0 0 1 2-2z M7 9h10 M7 13h6',
   finder: 'M3 5h9v7H3z M3 16h6 M10 12l9 9 M19 19a5 5 0 1 0-8-8',
+  task: 'M12 5v14 M5 12h14',
 }
 </script>
 
