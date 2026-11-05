@@ -275,6 +275,18 @@ class McpHub:
                 "error": "",
                 "version": "",
             }
+            # probe=False 时也别一律当成"没有工具"：已经握过手的服务器，
+            # 工具列表就在内存里，直接拿来用是零成本的。
+            # 否则 agent 的 system prompt 会因为"没人先打开过工作区"而变成空的。
+            if not entry["disabled"] and not probe and name in self._servers:
+                cached = self._servers[name]._tools
+                if cached is not None:
+                    entry["tools"] = cached
+                    # 版本号是握手时记下的；没记到就不写，别为它再起一次进程
+                    entry["version"] = getattr(self._servers[name], "_version", "") or ""
+                servers.append(entry)
+                continue
+
             if not entry["disabled"] and probe:
                 cooled = time.time() - self._servers[name]._failed_at < 60 if name in self._servers else False
                 if cooled:

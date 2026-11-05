@@ -22,6 +22,8 @@ from pydantic import BaseModel, Field
 
 from sqlalchemy import select
 
+from . import agent_runtime
+from . import importers
 from . import skills as skill_store
 from .concierge import plan as build_plan
 from .mcp_client import McpError, hub
@@ -41,6 +43,39 @@ class PlanInput(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     course_id: str = ""
     chapter_id: str = ""
+
+
+class SkillImportInput(BaseModel):
+    text: str = ""
+    path: str = ""
+    overwrite: bool = False
+
+
+class McpServerInput(BaseModel):
+    name: str = ""
+    command: str = ""
+    args: list[str] | str = []
+    env: dict[str, str] = {}
+    url: str = ""
+    disabled: bool = False
+
+
+class McpImportInput(BaseModel):
+    server: McpServerInput
+    confirm: bool = False
+    overwrite: bool = False
+
+
+class AgentStartInput(BaseModel):
+    goal: str = Field(min_length=1, max_length=4000)
+    course_id: str = ""
+    max_turns: int = Field(default=6, ge=1, le=12)
+
+
+class AgentResumeInput(BaseModel):
+    run_id: str
+    approve: bool = False
+    note: str = ""
 
 
 def register_workspace_routes(app, services) -> None:
@@ -153,6 +188,103 @@ def register_workspace_routes(app, services) -> None:
                 if newest is not None:
                     context["document_id"] = newest.id
         return build_plan(payload.message, context)
+
+    # ── 导入：技能包与 MCP 服务器 ─────────────────────────
+    def _fail(exc: Exception) -> HTTPException:
+        return HTTPException(422, str(exc))
+
+    @app.post("/workspace/skills/import")
+    def import_skill(payload: SkillImportInput):
+        """导入一份技能：粘贴 SKILL.md 正文，或给一个本地目录。
+
+        目录导入会把 references/、脚本一起搬走——只搬 SKILL.md 的话，
+        正文里写的 references/xxx.md 全成了死链。
+        """
+        try:
+            if payload.path.strip():
+                return importers.import_skill_dir(payload.path.strip(), payload.overwrite)
+            if not payload.text.strip():
+                raise importers.ImportError_("请粘贴 SKILL.md 的内容，或填一个目录路径")
+            return importers.import_skill(payload.text, payload.overwrite)
+        except importers.ImportError_ as exc:
+            raise _fail(exc) from exc
+
+    @app.delete("/workspace/skills/{name}", status_code=204)
+    def remove_skill(name: str):
+        try:
+            importers.delete_skill(name)
+        except importers.ImportError_ as exc:
+            raise _fail(exc) from exc
+
+    @app.post("/workspace/mcp/preview")
+    def preview_mcp(payload: McpServerInput):
+        """只看不装：返回将要执行的命令行原文。
+
+        界面在用户点「导入」之前必须显示这一行——MCP 服务器最终是拿这条命令
+        起的子进程，不给他看就等于让他盲签。
+        """
+        try:
+            normalized = importers.normalize_server(payload.model_dump())
+        except importers.ImportError_ as exc:
+            raise _fail(exc) from exc
+        return {
+            "name": normalized["name"],
+            "command": importers.preview_command(normalized["server"]),
+            "server": normalized["server"],
+            "warning": "导入后，这条命令会在这台机器上长期运行。",
+        }
+
+    @app.post("/workspace/mcp/test")
+    def test_mcp(payload: McpServerInput):
+        """真起一次子进程，握手并拉工具列表。连不上就别导入了。"""
+        return importers.test_mcp_server(payload.model_dump())
+
+    @app.post("/workspace/mcp/servers")
+    def import_mcp(payload: McpImportInput):
+        try:
+            return importers.import_mcp_server(
+                payload.server.model_dump(), confirm=payload.confirm, overwrite=payload.overwrite
+            )
+        except importers.ImportError_ as exc:
+            raise _fail(exc) from exc
+
+    @app.delete("/workspace/mcp/servers/{name}")
+    def remove_mcp(name: str):
+        try:
+            return importers.delete_mcp_server(name)
+        except importers.ImportError_ as exc:
+            raise _fail(exc) from exc
+
+    # ── Agent：模型自己选工具、自己调 ─────────────────────
+    @app.post("/agent/run")
+    def agent_run(payload: AgentStartInput):
+        """跑一次 agent 循环。
+
+        和「新建任务」的区别：任务是把一句话拆成预先定义好的几个动作；
+        agent 是模型看结果再决定下一步，能处理"先查一下再决定"这类事。
+        走到需要确认的工具时会停下来，返回 status=blocked。
+        """
+        return agent_runtime.start(services.llm, payload.goal, payload.course_id, payload.max_turns)
+
+    @app.post("/agent/resume")
+    def agent_resume(payload: AgentResumeInput):
+        """用户点了「允许」或「拒绝」，接着跑。"""
+        try:
+            return agent_runtime.resume(services.llm, payload.run_id, payload.approve, payload.note)
+        except KeyError as exc:
+            raise HTTPException(404, "这次运行已经过期了，重新发起一次") from exc
+
+    @app.get("/agent/runs/{run_id}")
+    def agent_status(run_id: str):
+        try:
+            return agent_runtime.get_run(run_id).public()
+        except KeyError as exc:
+            raise HTTPException(404, "这次运行已经过期了") from exc
+
+    @app.get("/agent/tools")
+    def agent_tools(probe: bool = False):
+        """模型能用的工具清单（界面展示用，也用来解释它为什么选了某个）。"""
+        return {"tools": agent_runtime.tool_catalog(probe=probe)}
 
     @app.get("/workspace/skills")
     def workspace_skills(q: str = ""):

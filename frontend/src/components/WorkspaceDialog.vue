@@ -9,7 +9,7 @@ type Skill = { name: string; description: string; path: string; chars: number; a
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 
-const tab = ref<'mcp' | 'skills'>('mcp')
+const tab = ref<'mcp' | 'skills' | 'agent'>('mcp')
 const loading = ref(false)
 const servers = ref<Server[]>([])
 const skills = ref<Skill[]>([])
@@ -17,6 +17,167 @@ const configPath = ref('')
 const error = ref('')
 
 const active = ref<string>('')
+
+// ── 导入：技能包 / MCP 服务器 ──────────────────────────
+const importing = ref<'' | 'skill' | 'mcp'>('')
+const skillText = ref('')
+const skillPath = ref('')
+const skillOverwrite = ref(false)
+const mcpForm = ref({ name: '', command: '', args: '', env: '', url: '' })
+const mcpPreview = ref<{ command: string; warning: string } | null>(null)
+const mcpTest = ref<{ ok: boolean; tools?: { name: string }[]; error?: string } | null>(null)
+const mcpConfirm = ref(false)
+const importError = ref('')
+const importOk = ref('')
+
+function resetImport() {
+  importError.value = ''
+  importOk.value = ''
+  mcpPreview.value = null
+  mcpTest.value = null
+  mcpConfirm.value = false
+}
+
+async function doImportSkill() {
+  resetImport()
+  importing.value = 'skill'
+  try {
+    const payload = await api<{ name: string; path: string; overwrote: boolean; files?: number }>(
+      '/workspace/skills/import',
+      { method: 'POST', body: JSON.stringify({ text: skillText.value, path: skillPath.value, overwrite: skillOverwrite.value }) },
+    )
+    importOk.value = `已导入 ${payload.name}${payload.files ? `（${payload.files} 个文件）` : ''}${payload.overwrote ? '，覆盖了旧的' : ''}`
+    skillText.value = ''
+    skillPath.value = ''
+    await load(false)
+  } catch (e) {
+    importError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    importing.value = ''
+  }
+}
+
+function mcpPayload() {
+  const form = mcpForm.value
+  return {
+    name: form.name.trim(),
+    command: form.command.trim(),
+    args: form.args.split('\n').map((line) => line.trim()).filter(Boolean),
+    env: Object.fromEntries(
+      form.env.split('\n').map((line) => line.split('=')).filter((kv) => kv.length >= 2)
+        .map((kv) => [kv[0].trim(), kv.slice(1).join('=').trim()]),
+    ),
+    url: form.url.trim(),
+  }
+}
+
+async function previewMcp() {
+  resetImport()
+  try {
+    mcpPreview.value = await api('/workspace/mcp/preview', { method: 'POST', body: JSON.stringify(mcpPayload()) })
+  } catch (e) {
+    importError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function testMcp() {
+  resetImport()
+  importing.value = 'mcp'
+  try {
+    mcpTest.value = await api('/workspace/mcp/test', { method: 'POST', body: JSON.stringify(mcpPayload()) })
+  } catch (e) {
+    importError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    importing.value = ''
+  }
+}
+
+async function saveMcp() {
+  resetImport()
+  importing.value = 'mcp'
+  try {
+    const result = await api<{ name: string; command: string }>('/workspace/mcp/servers', {
+      method: 'POST',
+      body: JSON.stringify({ server: mcpPayload(), confirm: mcpConfirm.value, overwrite: skillOverwrite.value }),
+    })
+    importOk.value = `已导入 ${result.name}：${result.command}`
+    mcpForm.value = { name: '', command: '', args: '', env: '', url: '' }
+    await load(true)
+  } catch (e) {
+    importError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    importing.value = ''
+  }
+}
+
+// ── Agent：模型自己选工具 ──────────────────────────────
+type AgentStep = { turn: number; kind: string; tool?: string; output?: string; detail?: string; reason?: string; decision?: string; ok?: boolean }
+type AgentRun = {
+  id: string; status: string; answer: string; steps: AgentStep[]
+  pending: { tool: string; args: Record<string, unknown>; risk: string; reason: string } | null
+  turn: number; max_turns: number
+}
+const agentGoal = ref('')
+const agentRun = ref<AgentRun | null>(null)
+const agentBusy = ref(false)
+const tools = ref<{ name: string; description: string; read_only: boolean }[]>([])
+
+async function startAgent() {
+  if (!agentGoal.value.trim() || agentBusy.value) return
+  agentBusy.value = true
+  importError.value = ''
+  agentRun.value = null
+  try {
+    agentRun.value = await api<AgentRun>('/agent/run', { method: 'POST', body: JSON.stringify({ goal: agentGoal.value.trim(), max_turns: 6 }) })
+  } catch (e) {
+    importError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    agentBusy.value = false
+  }
+}
+
+async function resumeAgent(approve: boolean) {
+  if (!agentRun.value) return
+  agentBusy.value = true
+  try {
+    agentRun.value = await api<AgentRun>('/agent/resume', {
+      method: 'POST',
+      body: JSON.stringify({ run_id: agentRun.value.id, approve }),
+    })
+  } catch (e) {
+    importError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    agentBusy.value = false
+  }
+}
+
+async function loadTools() {
+  try {
+    const payload = await api<{ tools: { name: string; description: string; read_only: boolean }[] }>('/agent/tools?probe=false')
+    tools.value = payload.tools
+  } catch { tools.value = [] }
+}
+
+async function removeSkill(name: string) {
+  if (!confirm(`删除技能 ${name}？`)) return
+  try {
+    await api(`/workspace/skills/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    await load(false)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function removeServer(name: string) {
+  if (!confirm(`移除 MCP 服务器 ${name}？会从 mcp.json 里删掉这一项。`)) return
+  try {
+    await api(`/workspace/mcp/servers/${encodeURIComponent(name)}`, { method: 'DELETE' })
+    await load(true)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
 // 工具多的服务器默认折叠：UUMit 有 56 个，全铺出来屏幕装不下
 const expanded = ref<Set<string>>(new Set())
 function isOpen(name: string) { return expanded.value.has(name) }
@@ -156,11 +317,44 @@ watch(() => props.open, (value) => {
       <div class="ws-tabs" role="tablist">
         <button :class="['ws-tab', { on: tab === 'mcp' }]" @click="tab = 'mcp'">MCP 工具 <span class="ws-count">{{ enabled.length }}</span></button>
         <button :class="['ws-tab', { on: tab === 'skills' }]" @click="tab = 'skills'">技能包 <span class="ws-count">{{ skills.length }}</span></button>
+        <button :class="['ws-tab', { on: tab === 'agent' }]" @click="tab = 'agent'; loadTools()">让 Agent 自己查</button>
       </div>
 
       <p v-if="error" class="ws-error">{{ error }}</p>
+      <p v-if="importError" class="ws-error">{{ importError }}</p>
+      <p v-if="importOk" class="ws-ok">{{ importOk }}</p>
 
       <div v-if="tab === 'mcp'" class="ws-body">
+        <section class="ws-import">
+          <div class="ws-import-head">
+            <strong>添加 MCP 服务器</strong>
+            <small>会写进 mcp.json，导入后立刻生效</small>
+          </div>
+          <div class="ws-form">
+            <label>名称 <input v-model="mcpForm.name" placeholder="filesystem" /></label>
+            <label>启动命令 <input v-model="mcpForm.command" placeholder="npx" /></label>
+            <label class="wide">参数 <textarea v-model="mcpForm.args" rows="2" placeholder="-y&#10;@modelcontextprotocol/server-filesystem&#10;D:\课程资料"></textarea></label>
+            <label class="wide">环境变量 <textarea v-model="mcpForm.env" rows="2" placeholder="API_KEY=xxx（每行一个）"></textarea></label>
+            <label>或者远程地址 <input v-model="mcpForm.url" placeholder="http://127.0.0.1:7000/mcp" /></label>
+          </div>
+          <div class="ws-import-actions">
+            <button class="button subtle small" @click="previewMcp">预览命令</button>
+            <button class="button subtle small" :disabled="!!importing" @click="testMcp">{{ importing === 'mcp' ? '连接中…' : '试连一次' }}</button>
+            <label class="ws-check"><input v-model="skillOverwrite" type="checkbox" />覆盖同名</label>
+          </div>
+          <div v-if="mcpPreview" class="ws-preview">
+            <p class="ws-preview-label">将要长期运行的命令：</p>
+            <code>{{ mcpPreview.command }}</code>
+            <p class="ws-preview-warn">{{ mcpPreview.warning }}</p>
+            <label class="ws-check"><input v-model="mcpConfirm" type="checkbox" />我确认这条命令可以在这台机器上运行</label>
+            <button class="button primary small" :disabled="!mcpConfirm || !!importing" @click="saveMcp">导入</button>
+          </div>
+          <div v-if="mcpTest" :class="['ws-preview', mcpTest.ok ? 'ok' : 'bad']">
+            <p v-if="mcpTest.ok" class="ws-preview-label">连上了，{{ mcpTest.tools?.length || 0 }} 个工具：{{ (mcpTest.tools || []).slice(0, 6).map(t => t.name).join('、') }}</p>
+            <p v-else class="ws-preview-label">连不上：{{ mcpTest.error }}</p>
+          </div>
+        </section>
+
         <div v-for="server in enabled" :key="server.name" class="ws-server">
           <button class="ws-server-head" @click="toggleServer(server)">
             <div>
@@ -208,7 +402,68 @@ watch(() => props.open, (value) => {
         </div>
       </div>
 
+      <div v-else-if="tab === 'agent'" class="ws-body">
+        <section class="ws-import">
+          <div class="ws-import-head">
+            <strong>让 agent 自己查</strong>
+            <small>它自己挑工具、自己调；会改东西的调用会停下来问你</small>
+          </div>
+          <textarea v-model="agentGoal" rows="3" class="ws-skill-text" placeholder="例如：用 ltspice 看看现在有哪些电路分组，把名字列出来"></textarea>
+          <div class="ws-import-actions">
+            <button class="button primary small" :disabled="agentBusy || !agentGoal.trim()" @click="startAgent">{{ agentBusy ? '运行中…' : '开始' }}</button>
+            <span class="ws-tools-count">可用工具 {{ tools.length }} 个</span>
+          </div>
+        </section>
+
+        <div v-if="agentRun" class="ws-agent-run">
+          <p class="ws-agent-status">
+            状态：{{ { running: '运行中', done: '已完成', blocked: '等你确认', failed: '失败' }[agentRun.status] || agentRun.status }}
+            · 第 {{ agentRun.turn }}/{{ agentRun.max_turns }} 轮
+          </p>
+
+          <ol class="ws-steps">
+            <li v-for="(step, index) in agentRun.steps" :key="index" :class="['ws-step', step.decision === 'deny' ? 'deny' : '']">
+              <span class="ws-step-index">{{ step.turn }}</span>
+              <div>
+                <p class="ws-step-title">
+                  {{ step.kind === 'tool' ? (step.tool || '工具') : step.kind === 'final' ? '给出回答' : step.kind }}
+                  <span v-if="step.decision === 'ask'" class="ws-badge warn">需确认</span>
+                  <span v-else-if="step.decision === 'deny'" class="ws-badge bad">已拒绝</span>
+                  <span v-else-if="step.ok === false" class="ws-badge bad">失败</span>
+                </p>
+                <p v-if="step.output" class="ws-step-out">{{ step.output.slice(0, 220) }}</p>
+                <p v-else-if="step.reason" class="ws-step-out">{{ step.reason }}</p>
+              </div>
+            </li>
+          </ol>
+
+          <div v-if="agentRun.pending" class="ws-preview">
+            <p class="ws-preview-label">它想调用 {{ agentRun.pending.tool }}（{{ agentRun.pending.risk }}）：{{ agentRun.pending.reason }}</p>
+            <code>{{ JSON.stringify(agentRun.pending.args) }}</code>
+            <div class="ws-import-actions">
+              <button class="button primary small" :disabled="agentBusy" @click="resumeAgent(true)">允许这一步</button>
+              <button class="button subtle small" :disabled="agentBusy" @click="resumeAgent(false)">拒绝</button>
+            </div>
+          </div>
+
+          <div v-if="agentRun.answer" class="ws-agent-answer">{{ agentRun.answer }}</div>
+        </div>
+      </div>
+
       <div v-else class="ws-body ws-body-skills">
+        <section class="ws-import">
+          <div class="ws-import-head">
+            <strong>导入技能包</strong>
+            <small>粘贴 SKILL.md，或填一个本地目录</small>
+          </div>
+          <textarea v-model="skillText" rows="5" class="ws-skill-text" placeholder="---&#10;name: my-skill&#10;description: 一句话说明什么时候用它&#10;---&#10;&#10;正文：步骤、产出、注意事项"></textarea>
+          <input v-model="skillPath" class="ws-skill-path" placeholder="或者：D:\skills\my-skill（目录里要有 SKILL.md）" />
+          <div class="ws-import-actions">
+            <label class="ws-check"><input v-model="skillOverwrite" type="checkbox" />覆盖同名技能</label>
+            <button class="button primary small" :disabled="importing === 'skill'" @click="doImportSkill">{{ importing === 'skill' ? '导入中…' : '导入' }}</button>
+          </div>
+        </section>
+
         <input v-model="query" class="ws-search" placeholder="搜索技能：fpga、docx、仿真…" />
         <div class="ws-skill-list">
           <button v-for="skill in filtered" :key="skill.name" :class="['ws-skill', { on: detail?.name === skill.name }]" @click="openSkill(skill)">
@@ -231,6 +486,53 @@ watch(() => props.open, (value) => {
 </template>
 
 <style scoped>
+.ws-agent-status { margin: 0 0 10px; font-size: 12.5px; color: var(--muted); }
+.ws-steps { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ws-step { display: flex; gap: 9px; align-items: flex-start; }
+.ws-step-index { width: 20px; height: 20px; border-radius: 50%; background: var(--soft); color: var(--accent-dark); font-size: 11px; display: flex; align-items: center; justify-content: center; flex: none; }
+.ws-step.deny .ws-step-index { background: var(--danger-soft); color: var(--danger); }
+.ws-step-title { margin: 0; font-size: 12.5px; color: var(--ink); display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.ws-step-out { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+.ws-badge.warn { background: var(--warning-soft); color: var(--warning); }
+.ws-badge.bad { background: var(--danger-soft); color: var(--danger); }
+.ws-agent-answer { margin-top: 12px; padding: 11px 13px; border-left: 3px solid var(--accent); background: var(--soft); border-radius: 6px; font-size: 13px; line-height: 1.75; white-space: pre-wrap; }
+
+.ws-agent-run { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--surface); }
+.ws-agent-status { margin: 0 0 10px; font-size: 12.5px; color: var(--muted); }
+.ws-steps { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ws-step { display: flex; gap: 9px; align-items: flex-start; }
+.ws-step-index { width: 20px; height: 20px; border-radius: 50%; background: var(--soft); color: var(--accent-dark); font-size: 11px; display: flex; align-items: center; justify-content: center; flex: none; }
+.ws-step.deny .ws-step-index { background: var(--danger-soft); color: var(--danger); }
+.ws-step-title { margin: 0; font-size: 12.5px; color: var(--ink); display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.ws-step-out { margin: 3px 0 0; font-size: 11.5px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; word-break: break-all; }
+.ws-badge.warn { background: var(--warning-soft); color: var(--warning); }
+.ws-badge.bad { background: var(--danger-soft); color: var(--danger); }
+.ws-agent-answer { margin-top: 12px; padding: 11px 13px; border-left: 3px solid var(--accent); background: var(--soft); border-radius: 6px; font-size: 13px; line-height: 1.75; white-space: pre-wrap; }
+
+.ws-ok { margin: 8px 0; font-size: 12.5px; color: var(--success); }
+.ws-import { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; background: var(--surface-alt); margin-bottom: 14px; }
+.ws-import-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.ws-import-head strong { font-size: 13px; }
+.ws-import-head small { font-size: 11.5px; color: var(--muted); }
+.ws-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+.ws-form label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.ws-form label.wide { grid-column: 1 / -1; }
+.ws-form input, .ws-form textarea {
+  font: inherit; font-size: 12.5px; padding: 6px 9px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--surface); color: var(--ink); resize: vertical;
+}
+.ws-skill-text { width: 100%; font: 12px/1.6 ui-monospace, Consolas, monospace; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); resize: vertical; }
+.ws-skill-path { width: 100%; margin-top: 7px; font: inherit; font-size: 12.5px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); }
+.ws-import-actions { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+.ws-check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink); cursor: pointer; }
+.ws-check input { width: 14px; height: 14px; accent-color: var(--accent); }
+.ws-preview { margin-top: 10px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.ws-preview.ok { border-color: var(--success-soft); }
+.ws-preview.bad { border-color: var(--danger-soft); }
+.ws-preview-label { margin: 0 0 5px; font-size: 12px; color: var(--ink); }
+.ws-preview code { display: block; font: 12px/1.6 ui-monospace, Consolas, monospace; padding: 6px 8px; background: #1f2430; color: #e6e9f0; border-radius: 5px; word-break: break-all; }
+.ws-preview-warn { margin: 6px 0; font-size: 11.5px; color: var(--warning); }
+
 .ws-mask { position: fixed; inset: 0; background: rgba(24, 34, 54, .35); display: flex; align-items: center; justify-content: center; z-index: 60; }
 .ws-panel { width: min(1040px, 94vw); height: min(760px, 88vh); background: var(--panel, var(--surface)); border-radius: 14px; padding: 18px 20px; box-shadow: 0 18px 48px rgba(24, 34, 54, .25); display: flex; flex-direction: column; }
 .ws-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
