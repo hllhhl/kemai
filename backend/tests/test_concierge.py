@@ -14,6 +14,8 @@ CONTEXT = {
     "course_id": "c1",
     "chapter_id": "ch3",
     "model_ready": True,
+    "has_material": True,
+    "has_deck": True,
     "chapters": [
         {"id": "ch1", "title": "第1章 数字逻辑基础", "index": 1},
         {"id": "ch3", "title": "第3章 组合逻辑电路", "index": 3},
@@ -41,11 +43,13 @@ def test_notes_picks_named_chapter():
     assert "第3章" in action["label"]
 
 
-def test_chapter_number_that_does_not_exist_selects_nothing():
-    """识别到章号但没这章时，宁可空着也不要猜一个错的。"""
+def test_chapter_number_that_does_not_exist_is_refused():
+    """识别到章号但没这章时，宁可停下来，也不能拿别的章顶上。"""
     result = plan("第9章做笔记", CONTEXT)
     action = only(result, "notes")
-    assert "第9章" in action["label"]
+    assert action["ready"] is False
+    assert "不存在" in action["label"] or "没有这一章" in action["blocked_reason"]
+    assert result["blocked"] is True
 
 
 def test_current_chapter_phrase():
@@ -119,3 +123,57 @@ def test_actions_capped():
 def test_empty_message_still_gives_answer():
     result = plan("", CONTEXT)
     assert kinds(result) == ["answer"]
+
+
+def test_practice_without_chapter_covers_whole_course():
+    """没提章节时必须给出章节 id：空数组会让后端 422「请选择章节」。"""
+    action = only(plan("出 10 道题", CONTEXT), "practice")
+    assert action["body"]["chapter_ids"], "chapter_ids 不能为空"
+    assert len(action["body"]["chapter_ids"]) == 3
+
+
+def test_blocked_when_course_has_no_material():
+    ctx = {**CONTEXT, "has_material": False}
+    result = plan("把第3章做成笔记", ctx)
+    assert result["blocked"] is True
+    assert any("资料" in reason for reason in result["reasons"])
+
+
+def test_finder_points_at_existing_endpoint():
+    """曾经写成 /finder/find，那个路径不存在，执行必然 404。"""
+    action = only(plan("这个课件是哪门课的视频", CONTEXT), "finder")
+    assert action["endpoint"].endswith("/courses/c1/finder/search")
+    assert action["body"]["limit"] == 8
+
+
+def test_answer_action_has_no_fake_endpoint():
+    action = only(plan("什么是时序逻辑", CONTEXT), "answer")
+    assert action["endpoint"] == "", "answer 需要会话上下文，不能给假路径让前端去调"
+
+
+def test_every_action_endpoint_exists_in_routes():
+    """最容易犯的错：动作里写了一个不存在的路径，执行时才 404。
+
+    这里直接扫源码里的 @app 路由声明，把动作端点逐条对回去。
+    """
+    import re
+    from pathlib import Path
+
+    app_dir = Path(__file__).resolve().parents[1] / "app"
+    routes: set[str] = set()
+    for source in app_dir.glob("*.py"):
+        routes |= set(re.findall(r'@app\.(?:get|post|put|patch|delete)\("([^"]+)"', source.read_text(encoding="utf-8")))
+    assert routes, "没扫到任何路由，测试本身失效了"
+
+    messages = [
+        "把第3章做成笔记，再出 10 道题",
+        "这个课件是哪门课的视频",
+        "什么是时序逻辑",
+    ]
+    for message in messages:
+        for action in plan(message, CONTEXT)["actions"]:
+            endpoint = action["endpoint"]
+            if not endpoint:
+                continue  # answer 没有可执行端点，前端会提示用助手
+            normalized = endpoint.replace("/courses/c1/", "/courses/{course_id}/")
+            assert normalized in routes, f"{action['type']} 的端点不存在：{endpoint}"

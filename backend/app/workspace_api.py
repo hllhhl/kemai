@@ -107,6 +107,9 @@ def register_workspace_routes(app, services) -> None:
             "chapter_id": payload.chapter_id,
             "chapters": [],
             "document_id": "",
+            "course_name": "",
+            "has_material": False,
+            "has_deck": False,
             "model_ready": bool(getattr(services.llm, "configured", False)),
         }
         if payload.course_id:
@@ -114,6 +117,24 @@ def register_workspace_routes(app, services) -> None:
                 course = db.get(Course, payload.course_id)
                 if course is None:
                     raise HTTPException(404, "课程不存在")
+                context["course_name"] = course.name
+                # 生笔记/出题都要求有已解析的资料，否则后端会 409——
+                # 与其让用户点了执行才看到报错，不如在计划阶段就说清楚
+                ready_docs = db.scalars(
+                    select(Document.id).where(
+                        Document.course_id == payload.course_id,
+                        Document.status == "ready",
+                        Document.kind.in_(["lecture", "note"]),
+                    ).limit(1)
+                ).all()
+                context["has_material"] = bool(ready_docs)
+                context["has_deck"] = bool(db.scalars(
+                    select(Document.id).where(
+                        Document.course_id == payload.course_id,
+                        Document.status == "ready",
+                        Document.kind == "lecture",
+                    ).limit(1)
+                ).all())
                 chapters = db.scalars(
                     select(Chapter).where(Chapter.course_id == payload.course_id)
                     .order_by(Chapter.position)

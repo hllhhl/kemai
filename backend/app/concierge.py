@@ -30,8 +30,13 @@ def _chapters(context: dict) -> list[dict]:
     return list(context.get("chapters") or [])
 
 
-def _pick_chapters(message: str, context: dict) -> tuple[list[str], str]:
-    """从话里认出「第几章」。认不出就用当前章节，再认不出就全课程。"""
+def _pick_chapters(message: str, context: dict) -> tuple[list[str], str, bool]:
+    """从话里认出「第几章」。
+
+    返回 (章节 id, 标签, 是否明确指定)。
+    第三种状态很重要：没提章节时可以默认用整门课，
+    但提了「第9章」而这门课只有 5 章，就必须停下来问，不能拿别的章顶上。
+    """
     chapters = _chapters(context)
     chinese = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6,
                "七": 7, "八": 8, "九": 9, "十": 10}
@@ -45,18 +50,18 @@ def _pick_chapters(message: str, context: dict) -> tuple[list[str], str]:
         for chapter in chapters:
             title = str(chapter.get("title") or "")
             if title.startswith(f"第{index}章") or title.startswith(f"第 {index} 章"):
-                return [chapter["id"]], title
+                return [chapter["id"]], title, True
             if int(chapter.get("index") or 0) == index:
-                return [chapter["id"]], title
+                return [chapter["id"]], title, True
         # 识别到章号但没匹配上：宁可什么都不选，也不要猜错的章节
-        return [], f"第{index}章"
+        return [], f"第{index}章（目录里没有）", True
 
     if re.search(r"这(一)?章|当前章|本章", message):
         current = context.get("chapter_id")
         if current:
             title = next((c["title"] for c in chapters if c["id"] == current), "当前章节")
-            return [current], title
-    return [], "全部章节"
+            return [current], title, True
+    return [], "", False
 
 
 def _pick_count(message: str, default: int = 5) -> int:
@@ -99,11 +104,25 @@ def plan(message: str, context: dict) -> dict:
     wants_finder = bool(re.search(r"找课|是哪门课|哪个课程|对一下课件|视频在哪", text))
     wants_answer = not any((wants_notes, wants_practice, wants_finder))
 
+    default_ids, default_label, explicit = _pick_chapters(text, context)
+    all_ids = [c["id"] for c in _chapters(context)][:6]
+    if explicit:
+        # 说了「第9章」就按第9章来；目录里没有就空着，绝不拿别的章顶上
+        scope_ids, scope_label = default_ids, default_label
+    elif all_ids:
+        # 没说哪一章：按整门课来，但后端章节上限是 6
+        scope_ids = all_ids
+        scope_label = f"整门课 {len(all_ids)} 章" if len(all_ids) == len(_chapters(context)) else f"前 {len(all_ids)} 章"
+    else:
+        scope_ids, scope_label = [], "整门课"
+    # 说了章号但本章不存在：这条动作不能执行
+    bad_chapter = explicit and not scope_ids
+
     if wants_notes:
-        chapter_ids, label = _pick_chapters(text, context)
+        chapter_ids, label = scope_ids, scope_label or _pick_chapters(text, context)[1]
         actions.append({
             "type": "notes",
-            "label": f"生成复习笔记（{label}）",
+            "label": f"生成复习笔记（{label or '整门课'}）" if not bad_chapter else "生成复习笔记（这一章不存在）",
             "detail": "按章节梳理原文，产出可阅读、可提问的笔记",
             "method": "POST",
             "endpoint": f"/courses/{course_id}/outlines",
@@ -113,14 +132,14 @@ def plan(message: str, context: dict) -> dict:
         })
 
     if wants_practice:
-        chapter_ids, label = _pick_chapters(text, context)
+        chapter_ids, label = scope_ids, scope_label or _pick_chapters(text, context)[1]
         count = _pick_count(text)
         difficulty = _pick_difficulty(text)
         question_type = _pick_type(text)
         difficulty_label = {"basic": "基础", "medium": "中等", "advanced": "提高"}[difficulty]
         actions.append({
             "type": "practice",
-            "label": f"出 {count} 道练习题（{label}）",
+            "label": f"出 {count} 道练习题（{label or '整门课'}）" if not bad_chapter else "出练习题（这一章不存在）",
             "detail": f"难度 {difficulty_label}，题型 {question_type}",
             "method": "POST",
             "endpoint": f"/courses/{course_id}/practice/generate",
@@ -144,8 +163,8 @@ def plan(message: str, context: dict) -> dict:
             "label": "反查这门课在 B 站的视频",
             "detail": "用课件页指纹找同源课程，并把每一讲对回课件页码",
             "method": "POST",
-            "endpoint": f"/courses/{course_id}/finder/find",
-            "body": {"document_id": document_id},
+            "endpoint": f"/courses/{course_id}/finder/search",
+            "body": {"document_id": document_id or None, "course_name": context.get("course_name") or "", "limit": 8},
             "needs_model": False,
             "seconds": 30,
         })
@@ -156,7 +175,7 @@ def plan(message: str, context: dict) -> dict:
             "label": "直接问我",
             "detail": "检索课程资料后回答，引用会标到具体页码或视频时间",
             "method": "POST",
-            "endpoint": "/sessions/{session_id}/chat",
+            "endpoint": "",   # 这类要靠右侧助手，带上会话上下文才能答
             "body": {"message": text},
             "needs_model": True,
             "seconds": 8,
@@ -165,19 +184,47 @@ def plan(message: str, context: dict) -> dict:
     actions = actions[:MAX_ACTIONS]
     needs_model = any(a["needs_model"] for a in actions)
     model_ready = bool(context.get("model_ready"))
+    has_material = bool(context.get("has_material"))
+    has_deck = bool(context.get("has_deck"))
 
-    if needs_model and not model_ready:
-        hint = "这些动作都要模型才能跑完，先去右上角「模型配置」填一个模型。"
+    # 逐条标出「现在能不能跑」，避免用户点了执行才吃 409
+    reasons: list[str] = []
+    for action in actions:
+        action["ready"] = True
+        action["blocked_reason"] = ""
+        if action["type"] in ("notes", "practice") and bad_chapter:
+            action["ready"] = False
+            action["blocked_reason"] = "目录里没有这一章"
+        elif action["needs_model"] and not model_ready:
+            action["ready"] = False
+            action["blocked_reason"] = "还没配模型"
+        elif action["type"] in ("notes", "practice") and not has_material:
+            action["ready"] = False
+            action["blocked_reason"] = "这门课还没有解析完成的资料"
+        elif action["type"] == "finder" and not has_deck:
+            action["ready"] = False
+            action["blocked_reason"] = "没有可用来比对的课件"
+        if not action["ready"] and action["blocked_reason"] not in reasons:
+            reasons.append(action["blocked_reason"])
+
+    if reasons:
+        hint = "；".join(reasons) + "。"
+        if any("模型" in r for r in reasons):
+            hint += "模型在右上角「模型配置」里配。"
     elif actions and all(a["type"] == "answer" for a in actions):
         hint = "我会用课程资料回答，答不上来会直说。"
     else:
         hint = "确认后开始执行。"
+
+    blocked = any(not a["ready"] for a in actions)
 
     return {
         "intent": "+".join(a["type"] for a in actions),
         "actions": actions,
         "needs_model": needs_model,
         "model_ready": model_ready,
+        "has_material": has_material,
         "hint": hint,
-        "blocked": needs_model and not model_ready,
+        "blocked": blocked,
+        "reasons": reasons,
     }

@@ -11,8 +11,18 @@ type Action = {
   body: Record<string, unknown>
   needs_model: boolean
   seconds: number
+  ready: boolean
+  blocked_reason: string
 }
-type Plan = { intent: string; actions: Action[]; needs_model: boolean; model_ready: boolean; hint: string; blocked: boolean }
+type Plan = {
+  intent: string
+  actions: Action[]
+  needs_model: boolean
+  model_ready: boolean
+  hint: string
+  blocked: boolean
+  reasons: string[]
+}
 type Step = { state: 'idle' | 'running' | 'done' | 'failed'; message: string }
 
 const props = defineProps<{ courseId: string; courseName: string; chapterId: string; modelConfigured: boolean }>()
@@ -57,6 +67,10 @@ async function run() {
   try {
     for (const [index, action] of plan.value.actions.entries()) {
       steps.value = { ...steps.value, [index]: { state: 'running', message: '正在提交…' } }
+      if (!action.ready) {
+        steps.value = { ...steps.value, [index]: { state: 'failed', message: action.blocked_reason } }
+        continue
+      }
       if (action.type === 'answer') {
         steps.value = { ...steps.value, [index]: { state: 'failed', message: '这类问题请用右侧助手，那边能带上你选中的段落' } }
         continue
@@ -139,7 +153,7 @@ watch(open, async (value) => {
         <div v-for="(action, index) in plan.actions" :key="index" class="dock-action">
           <div class="dock-action-main">
             <span class="dock-action-label">{{ action.label }}</span>
-            <span v-if="action.needs_model && !plan.model_ready" class="dock-badge warn">需要模型</span>
+            <span v-if="!action.ready" class="dock-badge warn">{{ action.blocked_reason }}</span>
           </div>
           <p class="dock-action-detail">{{ action.detail }}</p>
           <p v-if="steps[index]" :class="['dock-step', steps[index].state]">{{ steps[index].message }}</p>
