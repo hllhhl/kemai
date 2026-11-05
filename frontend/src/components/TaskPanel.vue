@@ -28,6 +28,10 @@ type AssistantMessage = {
   seconds: number
   error: string
   pending: Pending
+  usage: { total_tokens: number; model_calls: number } | null
+  suggestions: string[]
+  versions: string[]
+  maxTurns: number
 }
 type UserMessage = { role: 'user'; text: string }
 type Message = UserMessage | AssistantMessage
@@ -55,13 +59,22 @@ const modelError = ref('')
 const modelWrap = ref<HTMLElement | null>(null)
 
 // 历史对话：后端把每轮对话落盘，这里只是读列表
-type SessionRow = { id: string; title: string; course_id: string; updated_at: number; messages: number }
+type SessionRow = { id: string; title: string; course_id: string; updated_at: number; messages: number; pinned: boolean }
 const sessions = ref<SessionRow[]>([])
 const sessionsOpen = ref(false)
 const sessionsLoading = ref(false)
 const thread = ref<HTMLElement | null>(null)
 const box = ref<HTMLTextAreaElement | null>(null)
 const copied = ref(-1)
+const editingIndex = ref(-1)
+const editText = ref('')
+const sessionQuery = ref('')
+
+const filteredSessions = computed(() => {
+  const query = sessionQuery.value.trim().toLowerCase()
+  if (!query) return sessions.value
+  return sessions.value.filter((item) => item.title.toLowerCase().includes(query))
+})
 
 // ＋菜单：文件、技能、MCP、导出
 const menuOpen = ref(false)
@@ -144,7 +157,10 @@ function toHistory(messages: { role: string; content: string }[]): Message[] {
     const text = String(item.content || '')
     if (item.role === 'user') result.push({ role: 'user', text })
     else if (item.role === 'assistant' && !TOOL_NOTE.test(text)) {
-      result.push({ role: 'assistant', text, steps: [], status: 'done', seconds: 0, error: '', pending: null })
+      result.push({
+        role: 'assistant', text, steps: [], status: 'done', seconds: 0, error: '',
+        pending: null, usage: null, suggestions: [], versions: [], maxTurns: 6,
+      })
     }
   }
   return result
@@ -174,6 +190,31 @@ async function openSession(id: string) {
     history.value = toHistory(payload.messages)
     conversationId.value = id
     scrollToEnd()
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function pinSession(row: SessionRow) {
+  try {
+    const payload = await api<{ pinned: boolean }>(`/agent/conversations/${row.id}`, {
+      method: 'PATCH', body: JSON.stringify({ pinned: !row.pinned }),
+    })
+    row.pinned = payload.pinned
+    sessions.value.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updated_at - a.updated_at)
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function renameSession(row: SessionRow) {
+  const title = window.prompt('给这段对话起个名字', row.title)
+  if (!title || !title.trim() || title.trim() === row.title) return
+  try {
+    const payload = await api<{ title: string }>(`/agent/conversations/${row.id}`, {
+      method: 'PATCH', body: JSON.stringify({ title: title.trim() }),
+    })
+    row.title = payload.title
   } catch (e) {
     notice.value = e instanceof Error ? e.message : String(e)
   }
@@ -343,6 +384,7 @@ function handleEvent(event: { type: string; [key: string]: unknown }) {
   if (!message) return
   if (event.type === 'run') {
     if (event.conversation_id) conversationId.value = String(event.conversation_id)
+    message.maxTurns = Number(event.max_turns || message.maxTurns)
   } else if (event.type === 'step') {
     message.steps.push(event.step as Step)
   } else if (event.type === 'blocked') {
@@ -350,6 +392,7 @@ function handleEvent(event: { type: string; [key: string]: unknown }) {
     message.status = 'blocked'
   } else if (event.type === 'final') {
     message.text = String(event.answer || '')
+    message.usage = (event.usage as AssistantMessage['usage']) || null
     message.status = 'done'
   } else if (event.type === 'error') {
     message.status = 'failed'
@@ -363,15 +406,18 @@ function scrollToEnd() {
   })
 }
 
-async function send() {
-  if (!canSend.value) return
-  const goal = draft.value.trim()
+async function send(text?: string, opts: { reuseUser?: boolean; versions?: string[] } = {}) {
+  const goal = (text ?? draft.value).trim()
+  if (!props.courseId || !goal || busy.value) return
+  if (text === undefined) draft.value = ''
   menuOpen.value = false
   notice.value = ''
   oldTask.value = null
-  draft.value = ''
-  history.value.push({ role: 'user', text: goal })
-  const reply: AssistantMessage = { role: 'assistant', text: '', steps: [], status: 'running', seconds: 0, error: '', pending: null }
+  if (!opts.reuseUser) history.value.push({ role: 'user', text: goal })
+  const reply: AssistantMessage = {
+    role: 'assistant', text: '', steps: [], status: 'running', seconds: 0, error: '',
+    pending: null, usage: null, suggestions: [], versions: opts.versions || [], maxTurns: 6,
+  }
   history.value.push(reply)
   busy.value = true
   startTicker(reply)
@@ -420,8 +466,83 @@ async function send() {
     controller = null
     busy.value = false
     if (ticker) { clearInterval(ticker); ticker = null }
+    const message = current.value
+    if (message && message.status === 'done' && message.text) void loadSuggestions(message, goal)
     scrollToEnd()
   }
+}
+
+async function loadSuggestions(message: AssistantMessage, goal: string) {
+  try {
+    const payload = await api<{ suggestions: string[] }>('/agent/suggest', {
+      method: 'POST',
+      body: JSON.stringify({ goal, answer: message.text, course_id: props.courseId }),
+    })
+    // 异步回来时用户可能已经开了新对话，别把建议挂错人
+    if (history.value.includes(message)) message.suggestions = payload.suggestions
+  } catch {
+    /* 建议是锦上添花，失败就留空 */
+  }
+}
+
+/** 重新生成：把这条回答（含之后的）拿掉，用同一个问题再跑一次，旧回答留作版本。 */
+function regenerate(index: number) {
+  const old = history.value[index]
+  if (!old || old.role !== 'assistant' || busy.value) return
+  let goal = ''
+  for (let i = index - 1; i >= 0; i -= 1) {
+    const item = history.value[i]
+    if (item.role === 'user') { goal = item.text; break }
+  }
+  if (!goal) return
+  const versions = [...old.versions, old.text].filter(Boolean)
+  history.value.splice(index)
+  void send(goal, { reuseUser: true, versions })
+}
+
+function startEdit(index: number) {
+  const item = history.value[index]
+  if (!item || item.role !== 'user' || busy.value) return
+  editingIndex.value = index
+  editText.value = item.text
+}
+
+function saveEdit(index: number) {
+  const text = editText.value.trim()
+  editingIndex.value = -1
+  if (!text) return
+  const item = history.value[index]
+  if (!item || item.role !== 'user') return
+  item.text = text
+  history.value.splice(index + 1)
+  void send(text, { reuseUser: true })
+}
+
+function useSuggestion(text: string) {
+  draft.value = text
+  void nextTick(() => box.value?.focus())
+}
+
+function exportConversation() {
+  if (!history.value.length) return
+  const lines = ['# 课脉对话记录', '']
+  for (const item of history.value) {
+    if (item.role === 'user') lines.push(`## 我：${item.text}`, '')
+    else {
+      lines.push(`## 课脉`, '')
+      if (item.steps.length) {
+        lines.push(`> 用了 ${item.steps.length} 个工具：${item.steps.map(stepTitle).join('、')}`, '')
+      }
+      lines.push(item.text || item.error || '（没有回答）', '')
+    }
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `课脉对话-${new Date().toISOString().slice(0, 10)}.md`
+  link.click()
+  URL.revokeObjectURL(url)
 }
 
 function stop() {
@@ -522,17 +643,21 @@ watch(() => props.taskId, (id) => {
           对话历史<span v-if="sessions.length"> · {{ sessions.length }}</span>
         </button>
         <button class="bar-button" @click="reset">新对话</button>
+        <button class="bar-button" :disabled="!history.length" @click="exportConversation">导出对话</button>
         <div v-if="sessionsOpen" class="sessions">
           <p class="sessions-title">最近的对话</p>
-          <div v-for="item in sessions" :key="item.id" class="session-row">
+          <input v-model="sessionQuery" class="session-search" type="search" placeholder="搜索对话" aria-label="搜索对话" />
+          <div v-for="item in filteredSessions" :key="item.id" class="session-row">
             <button class="session-open" @click="openSession(item.id)">
-              <span class="session-title">{{ item.title }}</span>
+              <span class="session-title">{{ item.pinned ? '置顶 · ' : '' }}{{ item.title }}</span>
               <span class="session-meta">{{ item.messages }} 条 · {{ timeLabel(item.updated_at) }}</span>
             </button>
+            <button class="session-act" :title="item.pinned ? '取消置顶' : '置顶'" @click.stop="pinSession(item)">{{ item.pinned ? '★' : '☆' }}</button>
+            <button class="session-act" title="重命名" @click.stop="renameSession(item)">✎</button>
             <button class="session-del" title="删除这段对话" @click.stop="removeSession(item.id)">×</button>
           </div>
           <p v-if="sessionsLoading" class="model-empty-row">读取中…</p>
-          <p v-else-if="!sessions.length" class="model-empty-row">还没有历史对话</p>
+          <p v-else-if="!filteredSessions.length" class="model-empty-row">{{ sessionQuery ? '没有匹配的对话' : '还没有历史对话' }}</p>
         </div>
       </div>
 
@@ -548,9 +673,19 @@ watch(() => props.taskId, (id) => {
         </div>
 
         <template v-for="(item, index) in history" :key="index">
-          <!-- 用户 -->
+          <!-- 用户：点一下可以改完重发 -->
           <div v-if="item.role === 'user'" class="row right">
-            <div class="bubble">{{ item.text }}</div>
+            <div v-if="editingIndex === index" class="edit-box">
+              <textarea v-model="editText" rows="2" @keydown.enter.exact.prevent="saveEdit(index)"></textarea>
+              <div class="edit-actions">
+                <button class="text-button" @click="editingIndex = -1">取消</button>
+                <button class="button primary small" @click="saveEdit(index)">改完重发</button>
+              </div>
+            </div>
+            <div v-else class="bubble-wrap">
+              <div class="bubble">{{ item.text }}</div>
+              <button class="edit-trigger" title="编辑这条消息" @click="startEdit(index)">✎</button>
+            </div>
           </div>
 
           <!-- Agent -->
@@ -559,15 +694,16 @@ watch(() => props.taskId, (id) => {
             <div class="answer-col">
               <p class="who">课脉</p>
               <p class="status">
-                <span v-if="item.status === 'running'">正在做 · {{ item.seconds }}s</span>
+                <span v-if="item.status === 'running'">正在做 · 第 {{ item.steps.length + 1 }} / {{ item.maxTurns }} 步 · {{ item.seconds }}s</span>
                 <span v-else-if="item.status === 'failed'">没有完成 · {{ item.seconds }}s</span>
                 <span v-else-if="item.status === 'blocked'">等你确认 · {{ item.seconds }}s</span>
-                <span v-else>已完成 · {{ item.seconds }}s</span>
+                <span v-else>已完成 · 走了 {{ item.steps.length }} 步 · {{ item.seconds }}s</span>
               </p>
 
               <details v-if="item.steps.length" class="trace">
-                <summary>用了 {{ item.steps.length }} 个工具</summary>
+                <summary>用了 {{ item.steps.length }} 个工具 · 展开看每一步</summary>
                 <div v-for="(step, stepIndex) in item.steps" :key="stepIndex" class="trace-row">
+                  <span class="trace-index">{{ stepIndex + 1 }}</span>
                   <span class="trace-tool">{{ stepTitle(step) }}</span>
                   <span class="trace-text">{{ stepLine(step) }}</span>
                 </div>
@@ -577,7 +713,19 @@ watch(() => props.taskId, (id) => {
 
               <MarkdownContent v-if="item.text" :content="item.text" />
 
+              <details v-if="item.versions.length" class="versions">
+                <summary>之前有 {{ item.versions.length }} 个回答版本</summary>
+                <div v-for="(version, vIndex) in item.versions" :key="vIndex" class="version-row">
+                  <span class="version-label">版本 {{ vIndex + 1 }}</span>
+                  <MarkdownContent :content="version" />
+                </div>
+              </details>
+
               <p v-if="item.error" class="chat-error">{{ item.error }}</p>
+
+              <div v-if="item.suggestions.length && item.status !== 'running'" class="followups">
+                <button v-for="suggestion in item.suggestions" :key="suggestion" class="chip small" @click="useSuggestion(suggestion)">{{ suggestion }}</button>
+              </div>
 
               <div v-if="item.pending" class="approve">
                 <p class="approve-title">这一步会改动内容，需要你点头</p>
@@ -591,7 +739,11 @@ watch(() => props.taskId, (id) => {
               <div v-if="item.status !== 'running' && item.text" class="meta">
                 <button class="meta-button" @click="copy(index, item.text)">{{ copied === index ? '已复制' : '复制' }}</button>
                 <span class="dot">·</span>
+                <button class="meta-button" :disabled="busy" @click="regenerate(index)">重新生成</button>
+                <span class="dot">·</span>
                 <span>{{ item.seconds }}s</span>
+                <span v-if="item.usage?.total_tokens" class="dot">·</span>
+                <span v-if="item.usage?.total_tokens">{{ item.usage.total_tokens }} tokens / {{ item.usage.model_calls }} 次调用</span>
                 <span class="dot">·</span>
                 <span>{{ modelLabel }}</span>
               </div>
@@ -682,7 +834,7 @@ watch(() => props.taskId, (id) => {
                 </div>
               </div>
               <button v-if="busy" class="text-button" @click="stop">停止</button>
-              <button class="send" :disabled="!canSend" aria-label="发送" @click="send">↑</button>
+              <button class="send" :disabled="!canSend" aria-label="发送" @click="send()">↑</button>
             </div>
           </div>
         </div>
@@ -703,6 +855,10 @@ watch(() => props.taskId, (id) => {
 
 .sessions { position: absolute; top: 30px; left: 4px; width: 300px; max-height: 340px; overflow-y: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 14px 36px rgba(24, 34, 54, .16); padding: 6px; z-index: 20; }
 .sessions-title { margin: 6px 8px 4px; font-size: 10.5px; color: var(--muted); }
+.session-search { width: calc(100% - 16px); margin: 2px 8px 6px; border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; font: inherit; font-size: 12px; background: var(--surface); outline: 0; }
+.session-search:focus { border-color: var(--accent-line); }
+.session-act { flex: none; width: 24px; border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; border-radius: 6px; font-family: inherit; }
+.session-act:hover { color: var(--accent-dark); background: var(--soft); }
 .session-row { display: flex; align-items: stretch; gap: 2px; }
 .session-open { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; border: 0; background: transparent; border-radius: 7px; padding: 7px 9px; cursor: pointer; text-align: left; font-family: inherit; }
 .session-open:hover { background: var(--soft); }
@@ -722,7 +878,14 @@ watch(() => props.taskId, (id) => {
 
 .row { display: flex; gap: 10px; align-items: flex-start; }
 .row.right { justify-content: flex-end; }
-.bubble { max-width: 78%; background: var(--surface-alt, #eef1f6); color: var(--ink); border-radius: 14px; padding: 9px 14px; font-size: 13.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.bubble-wrap { display: flex; align-items: flex-end; gap: 4px; max-width: 82%; }
+.bubble { background: var(--surface-alt, #eef1f6); color: var(--ink); border-radius: 14px; padding: 9px 14px; font-size: 13.5px; line-height: 1.7; white-space: pre-wrap; word-break: break-word; }
+.edit-trigger { border: 0; background: transparent; color: var(--muted); font-size: 12px; cursor: pointer; padding: 2px 4px; opacity: 0; font-family: inherit; }
+.bubble-wrap:hover .edit-trigger, .edit-trigger:focus { opacity: 1; }
+.edit-trigger:hover { color: var(--accent-dark); }
+.edit-box { width: 82%; border: 1px solid var(--accent-line); border-radius: 12px; padding: 8px; background: var(--surface); }
+.edit-box textarea { width: 100%; border: 0; outline: 0; resize: vertical; font: inherit; font-size: 13.5px; background: transparent; }
+.edit-actions { display: flex; justify-content: flex-end; gap: 10px; align-items: center; }
 .avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 12px; display: flex; align-items: center; justify-content: center; flex: none; margin-top: 2px; }
 .answer-col { flex: 1; min-width: 0; }
 .who { margin: 0; font-size: 13px; font-weight: 600; }
@@ -732,9 +895,18 @@ watch(() => props.taskId, (id) => {
 .trace { margin: 0 0 10px; font-size: 12px; color: var(--muted); }
 .trace summary { cursor: pointer; font-size: 12px; color: var(--muted); padding: 2px 0; }
 .trace summary:hover { color: var(--accent-dark); }
-.trace-row { display: flex; gap: 8px; padding: 5px 0 5px 12px; border-left: 2px solid var(--line); margin-top: 4px; }
+.trace-row { display: flex; gap: 8px; padding: 5px 0 5px 8px; border-left: 2px solid var(--line); margin-top: 4px; align-items: baseline; }
+.trace-index { flex: none; width: 16px; font-size: 10.5px; color: var(--muted); }
 .trace-tool { flex: none; color: var(--ink); font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 11.5px; }
 .trace-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.versions { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
+.versions summary { cursor: pointer; font-size: 11.5px; }
+.version-row { border-left: 2px solid var(--line); padding: 6px 0 6px 12px; margin-top: 6px; opacity: .75; }
+.version-label { font-size: 10.5px; color: var(--muted); }
+.followups { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.chip.small { font-size: 11.5px; padding: 4px 10px; }
+.meta-button:disabled { opacity: .5; cursor: not-allowed; }
 
 .chat-error { margin: 8px 0 0; font-size: 12.5px; color: var(--danger); }
 

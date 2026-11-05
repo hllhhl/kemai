@@ -507,3 +507,103 @@ def test_deleting_a_conversation_removes_the_file(tmp_path, monkeypatch, fake_to
     assert agent_runtime.delete_conversation(conversation_id) is True
     assert not (tmp_path / f"{conversation_id}.json").exists()
     assert agent_runtime.load_conversation(conversation_id) is None
+
+
+def test_run_reports_its_own_token_usage(fake_tools):
+    """本次消耗要跟着 final 一起回界面，不能只存在后端日志里。"""
+    from app import token_usage
+
+    class MeteredLLM(FakeLLM):
+        def complete(self, messages, json_mode=False):  # noqa: ARG002
+            token_usage.record_usage({
+                "input_tokens": 120, "output_tokens": 30, "total_tokens": 150,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+            }, "answer")
+            return super().complete(messages, json_mode=json_mode)
+
+    llm = MeteredLLM([{"action": "final", "answer": "这是一个足够长的结论，用来完成这一轮。"}])
+    result = agent_runtime.start(llm, "用量测试", "c1", max_turns=2)
+
+    assert result["usage"] is not None
+    assert result["usage"]["total_tokens"] == 150
+    assert result["usage"]["model_calls"] == 1
+
+
+def test_stream_does_not_blow_up_on_contextvar(monkeypatch, fake_tools):
+    """流式生成器会在不同 worker context 恢复，collect_usage 不能跨 yield。
+
+    之前把 with 包住整个 generator，回答都出来了却在退出时抛
+    'TokenVar was created in a different Context'，界面显示成"没有完成"。
+    """
+    llm = FakeLLM([{"action": "final", "answer": "这是一个足够长的结论，用来完成这一轮。"}])
+    events = list(agent_runtime.stream(llm, "流式测试", "c1", max_turns=2))
+
+    assert events[-1]["type"] == "final"
+    assert events[-1]["usage"] is not None
+    assert events[-1]["answer"]
+
+
+def test_renaming_and_pinning_a_conversation(tmp_path, monkeypatch, fake_tools):
+    monkeypatch.setattr(agent_runtime, "_session_dir", lambda: tmp_path)
+    agent_runtime._conversations.clear()
+    llm = FakeLLM([{"action": "final", "answer": "这是一个足够长的结论，用来生成一条会话记录。"}])
+    cid = agent_runtime.start(llm, "原名", "c1", max_turns=2)["conversation_id"]
+
+    updated = agent_runtime.update_conversation(cid, title="新名字", pinned=True)
+    assert updated["title"] == "新名字" and updated["pinned"] is True
+
+    rows = agent_runtime.list_conversations()
+    assert rows[0]["id"] == cid and rows[0]["pinned"] is True
+    # 重启后仍然生效
+    agent_runtime._conversations.clear()
+    assert agent_runtime.load_conversation(cid)["title"] == "新名字"
+
+
+def test_run_reports_its_own_token_usage(fake_tools):
+    """本次消耗要跟着 final 一起回界面，不能只存在后端日志里。"""
+    from app import token_usage
+
+    class MeteredLLM(FakeLLM):
+        def complete(self, messages, json_mode=False):  # noqa: ARG002
+            token_usage.record_usage({
+                "input_tokens": 120, "output_tokens": 30, "total_tokens": 150,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+            }, "answer")
+            return super().complete(messages, json_mode=json_mode)
+
+    llm = MeteredLLM([{"action": "final", "answer": "这是一个足够长的结论，用来完成这一轮。"}])
+    result = agent_runtime.start(llm, "用量测试", "c1", max_turns=2)
+
+    assert result["usage"] is not None
+    assert result["usage"]["total_tokens"] == 150
+    assert result["usage"]["model_calls"] == 1
+
+
+def test_stream_does_not_blow_up_on_contextvar(monkeypatch, fake_tools):
+    """流式生成器会在不同 worker context 恢复，collect_usage 不能跨 yield。
+
+    之前把 with 包住整个 generator，回答都出来了却在退出时抛
+    'TokenVar was created in a different Context'，界面显示成"没有完成"。
+    """
+    llm = FakeLLM([{"action": "final", "answer": "这是一个足够长的结论，用来完成这一轮。"}])
+    events = list(agent_runtime.stream(llm, "流式测试", "c1", max_turns=2))
+
+    assert events[-1]["type"] == "final"
+    assert events[-1]["usage"] is not None
+    assert events[-1]["answer"]
+
+
+def test_renaming_and_pinning_a_conversation(tmp_path, monkeypatch, fake_tools):
+    monkeypatch.setattr(agent_runtime, "_session_dir", lambda: tmp_path)
+    agent_runtime._conversations.clear()
+    llm = FakeLLM([{"action": "final", "answer": "这是一个足够长的结论，用来生成一条会话记录。"}])
+    cid = agent_runtime.start(llm, "原名", "c1", max_turns=2)["conversation_id"]
+
+    updated = agent_runtime.update_conversation(cid, title="新名字", pinned=True)
+    assert updated["title"] == "新名字" and updated["pinned"] is True
+
+    rows = agent_runtime.list_conversations()
+    assert rows[0]["id"] == cid and rows[0]["pinned"] is True
+    # 重启后仍然生效
+    agent_runtime._conversations.clear()
+    assert agent_runtime.load_conversation(cid)["title"] == "新名字"

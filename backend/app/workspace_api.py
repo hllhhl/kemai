@@ -85,6 +85,17 @@ class AgentResumeInput(BaseModel):
     note: str = ""
 
 
+class ConversationUpdateInput(BaseModel):
+    title: str | None = None
+    pinned: bool | None = None
+
+
+class SuggestInput(BaseModel):
+    goal: str = ""
+    answer: str = ""
+    course_id: str = ""
+
+
 def register_workspace_routes(app, services) -> None:
     # 课程工具要查库，这里把 Services 交给它；不写进模块级全局变量是为了让测试能换掉
     course_tools.bind(services)
@@ -365,6 +376,49 @@ def register_workspace_routes(app, services) -> None:
     @app.delete("/agent/conversations/{conversation_id}")
     def agent_conversation_delete(conversation_id: str):
         return {"deleted": agent_runtime.delete_conversation(conversation_id)}
+
+    @app.patch("/agent/conversations/{conversation_id}")
+    def agent_conversation_update(conversation_id: str, payload: ConversationUpdateInput):
+        conv = agent_runtime.update_conversation(
+            conversation_id, title=payload.title, pinned=payload.pinned)
+        if conv is None:
+            raise HTTPException(404, "没有这个对话，可能已经被删了")
+        return {"id": conversation_id, "title": conv.get("title", ""),
+                "pinned": bool(conv.get("pinned", False))}
+
+    @app.post("/agent/suggest")
+    def agent_suggest(payload: SuggestInput):
+        """回答结束后给 3 条接着能问的话。
+
+        单独一个接口而不是塞进主流程：多一次模型调用不该拖慢上面的回答，
+        失败了也只是少了几个建议，界面留空即可。
+        """
+        if not getattr(services.llm, "configured", False):
+            return {"suggestions": []}
+        prompt = [
+            {"role": "system", "content":
+                "根据下面这轮问答，给出 3 条用户很可能想接着问的短问题。"
+                "只输出 JSON 字符串数组，每条不超过 24 个汉字，不要解释、不要编号。"},
+            {"role": "user", "content":
+                f"用户问：{payload.goal[:400]}\n\n回答：{payload.answer[:1200]}"},
+        ]
+        try:
+            text = services.llm.complete(prompt, json_mode=True)
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                items = parsed
+            elif isinstance(parsed, dict):
+                # 不同网关给的结构不一样：有的给数组，有的包在 questions /
+                # suggestions 里，还有的直接用一个自定义键装数组。
+                items = parsed.get("suggestions") or parsed.get("questions") or next(
+                    (value for value in parsed.values() if isinstance(value, list)), [])
+            else:
+                items = []
+            clean = [str(item).strip()[:40] for item in items if str(item).strip()][:3]
+            return {"suggestions": clean}
+        except Exception:  # noqa: BLE001 - 建议是锦上添花，失败就留空
+            logger.debug("生成追问建议失败", exc_info=True)
+            return {"suggestions": []}
 
     # ── 长期记忆：文件在哪、写了什么 ──────────────────────
     @app.get("/audit")

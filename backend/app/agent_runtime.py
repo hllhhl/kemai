@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from . import audit, course_tools
+from .token_usage import TokenUsage, collect_usage
 from .mcp_client import McpError, hub, tool_allowed
 from .sentinel import ALLOW, ASK, DENY, sentinel
 
@@ -95,6 +96,8 @@ class AgentRun:
         self.call_streak: dict[str, int] = {}      # 完全相同调用的连续次数
         self.tool_totals: dict[str, int] = {}      # 单个工具在本轮里的累计次数
         self.last_signature = ""
+        # 本次运行的模型消耗（final 事件带给界面）
+        self.usage: dict | None = None
         self.turn = 0
         self.created_at = time.time()
 
@@ -109,6 +112,7 @@ class AgentRun:
             "turn": self.turn,
             "max_turns": self.max_turns,
             "conversation_id": self.conversation_id,
+            "usage": self.usage,
         }
 
 
@@ -173,6 +177,7 @@ def persist_conversation(conversation_id: str) -> None:
             "title": conv.get("title") or _title_of(conv["messages"]),
             "created_at": conv.get("created_at") or conv["updated"],
             "updated_at": conv["updated"],
+            "pinned": bool(conv.get("pinned", False)),
             "messages": conv["messages"],
         }
         _session_path(conversation_id).write_text(
@@ -201,6 +206,7 @@ def load_conversation(conversation_id: str) -> dict | None:
         "course_id": payload.get("course_id", ""),
         "title": payload.get("title", ""),
         "created_at": payload.get("created_at"),
+        "pinned": bool(payload.get("pinned", False)),
     }
     _conversations[conversation_id] = conv
     return conv
@@ -221,10 +227,27 @@ def list_conversations(course_id: str = "", limit: int = 30) -> list[dict]:
             "title": payload.get("title") or _title_of(messages),
             "course_id": payload.get("course_id", ""),
             "updated_at": payload.get("updated_at") or 0,
+            "pinned": bool(payload.get("pinned", False)),
             "messages": len(messages),
         })
-    rows.sort(key=lambda item: item["updated_at"], reverse=True)
+    # 置顶的排前面，其余按最近使用
+    rows.sort(key=lambda item: (not item["pinned"], -item["updated_at"]))
     return rows[:limit]
+
+
+def update_conversation(conversation_id: str, title: str | None = None,
+                        pinned: bool | None = None) -> dict | None:
+    """改名 / 置顶。写回同一个文件，不另建索引。"""
+    conv = load_conversation(conversation_id)
+    if conv is None:
+        return None
+    if title is not None:
+        conv["title"] = title.strip()[:80] or conv.get("title") or "未命名对话"
+    if pinned is not None:
+        conv["pinned"] = bool(pinned)
+    conv["updated"] = time.time()
+    persist_conversation(conversation_id)
+    return conv
 
 
 def delete_conversation(conversation_id: str) -> bool:
@@ -626,9 +649,13 @@ def advance(run: AgentRun, llm) -> dict:
         run.answer = "还没有配置模型，先到右上角「模型配置」填一个。"
         return run.public()
 
+    usage = TokenUsage()
     while run.status == "running" and run.turn < run.max_turns:
-        outcome = _turn(run, llm)
+        # 和 agent.py 一致：ContextVar 的 enter/reset 不跨生成器边界
+        with collect_usage(usage):
+            outcome = _turn(run, llm)
         if outcome in ("done", "blocked", "failed"):
+            run.usage = usage.snapshot()
             if outcome == "done":
                 # 非流式这条路径也要记住并归档，否则同一个问题走 /agent/run
                 # 和走 /agent/stream 留下的痕迹不一样。
@@ -636,7 +663,9 @@ def advance(run: AgentRun, llm) -> dict:
                 _archive(run)
             return run.public()
 
-    _close_out(run)
+    with collect_usage(usage):
+        _close_out(run)
+    run.usage = usage.snapshot()
     _archive(run)
     return run.public()
 
@@ -659,6 +688,7 @@ def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
     run.messages.extend(_history(conversation_id))
     run.messages.append({"role": "user", "content": goal})
     _runs[run.id] = run
+    usage = TokenUsage()
     yield {"type": "run", "run_id": run.id, "max_turns": run.max_turns,
            "conversation_id": conversation_id}
 
@@ -669,7 +699,11 @@ def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
         return
 
     while run.status == "running" and run.turn < run.max_turns:
-        outcome = _turn(run, llm)
+        # StreamingResponse 会在不同 worker context 里恢复同步生成器。
+        # ContextVar 的 enter/reset 必须落在同一次 next() 内，绝不跨 yield，
+        # 否则会报 "created in a different Context"（agent.py 也是这么写的）。
+        with collect_usage(usage):
+            outcome = _turn(run, llm)
         if run.steps:
             yield {"type": "step", "step": run.steps[-1]}
         if outcome == "blocked":
@@ -683,13 +717,16 @@ def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
         if outcome == "done":
             _remember(conversation_id, run)
             _archive(run)
-            yield {"type": "final", "answer": run.answer}
+            run.usage = usage.snapshot()
+            yield {"type": "final", "answer": run.answer, "usage": run.usage}
             return
 
-    _close_out(run)
+    with collect_usage(usage):
+        _close_out(run)
     _remember(conversation_id, run)
     _archive(run)
-    yield {"type": "final", "answer": run.answer}
+    run.usage = usage.snapshot()
+    yield {"type": "final", "answer": run.answer, "usage": run.usage}
 
 
 def _tool_in_scope(tool: str, patterns: list[str]) -> bool:
