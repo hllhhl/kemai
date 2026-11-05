@@ -49,12 +49,13 @@ RISK: dict[str, tuple[str, str]] = {
     "finder": ("low", "只读检索，比对课件与视频"),
     "notes": ("moderate", "会生成一份复习笔记，覆盖同章节的旧版本"),
     "practice": ("moderate", "会生成题目，覆盖同签名下的旧题"),
+    "memory": ("sensitive", "会改写长期记忆，影响以后每一次回答"),
     "organize": ("sensitive", "会移动或重命名你的文件"),
     "delete": ("sensitive", "会删除内容，删了不能撤销"),
 }
 
 # 默认"这类东西值得先问一句"的动作
-DEFAULT_ASK = {"organize", "delete"}
+DEFAULT_ASK = {"organize", "delete", "memory"}
 
 CONFIG_NAME = "sentinel.json"
 

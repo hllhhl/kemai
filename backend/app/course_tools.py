@@ -106,6 +106,45 @@ def catalog() -> list[dict]:
             },
         },
         {
+            "name": "kemai.memory_read",
+            "description": "读长期记忆。scope：identity(我是谁) / soul(怎么做) / user(关于用户) / memory(跨课程) / course(这门课) / log(今天的日志)。",
+            "read_only": True,
+            "destructive": False,
+            "schema": {
+                "type": "object",
+                "properties": {"scope": {"type": "string",
+                    "enum": ["identity", "soul", "user", "memory", "course", "log"]}},
+                "required": ["scope"],
+            },
+        },
+        {
+            "name": "kemai.memory_write",
+            "description": "往长期记忆里写。默认追加（append=true）；整份替换只用于「改掉这条」。写 user/memory/course 最常用。",
+            "read_only": False,
+            "destructive": False,
+            "risk_type": "memory",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "enum": ["user", "memory", "course", "soul", "identity"]},
+                    "content": {"type": "string"},
+                    "append": {"type": "boolean", "description": "true=追加，false=整份替换，默认 true"},
+                },
+                "required": ["scope", "content"],
+            },
+        },
+        {
+            "name": "kemai.memory_log",
+            "description": "往今天的日志追加一条（做了什么、发现了什么）。只追加，不改已有内容。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+                "required": ["text"],
+            },
+        },
+        {
             "name": "kemai.docs_export",
             "description": "把最新笔记导出成 docx 或 pptx 文件。kind 取 docx 或 pptx。",
             "read_only": False,
@@ -147,6 +186,9 @@ def call(name: str, args: dict, course_id: str) -> dict:
         "kemai.wrong_read": _wrong,
         "kemai.course_search": _search,
         "kemai.notes_build": _build,
+        "kemai.memory_read": _memory_read,
+        "kemai.memory_write": _memory_write,
+        "kemai.memory_log": _memory_log,
         "kemai.docs_export": _export,
     }.get(name)
     if handler is None:
@@ -379,3 +421,42 @@ def _build(args: dict, course_id: str) -> dict:
     if status == "failed":
         return {"ok": False, "text": f"生成失败：{error or '未知原因'}（job {job['job_id'][:8]}）"}
     return {"ok": True, "text": f"已经开始了，但 {wait} 秒内没跑完（当前 {status}）。告诉用户稍后再问一次即可，不要重复发起。"}
+
+def _memory_read(args: dict, course_id: str) -> dict:
+    from . import longterm
+
+    scope = str(args.get("scope") or "").strip()
+    try:
+        text = longterm.read(scope, course_id)
+    except ValueError as exc:
+        return {"ok": False, "text": str(exc)}
+    if not text.strip():
+        return {"ok": True, "text": f"{scope} 还是空的"}
+    return {"ok": True, "text": text[:MAX_NOTE_CHARS]}
+
+
+def _memory_write(args: dict, course_id: str) -> dict:
+    from . import longterm
+
+    scope = str(args.get("scope") or "").strip()
+    content = str(args.get("content") or "").strip()
+    if not content:
+        return {"ok": False, "text": "content 不能为空"}
+    # append 默认 true：模型最容易犯的错是"整理"一遍把用户手写的内容洗掉
+    append = args.get("append")
+    append = True if append is None else bool(append)
+    try:
+        result = longterm.write(scope, content, course_id, append=append)
+    except ValueError as exc:
+        return {"ok": False, "text": str(exc)}
+    return {"ok": True, "text": f"已写入 {result['path']}（{result['bytes']} 字节，{'追加' if append else '替换'}）"}
+
+
+def _memory_log(args: dict, course_id: str) -> dict:
+    from . import longterm
+
+    text = str(args.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "text": "text 不能为空"}
+    result = longterm.append_log(text, course_id)
+    return {"ok": True, "text": f"已记到 {result['path']}"}

@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from sqlalchemy import select
 
-from . import agent_runtime, course_tools
+from . import agent_runtime, course_tools, longterm
 from . import importers
 from . import skills as skill_store
 from .concierge import plan as build_plan
@@ -43,6 +43,11 @@ class PlanInput(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     course_id: str = ""
     chapter_id: str = ""
+
+
+class MemoryWriteInput(BaseModel):
+    content: str = Field(min_length=1, max_length=200_000)
+    course_id: str = ""
 
 
 class SkillImportInput(BaseModel):
@@ -339,6 +344,35 @@ def register_workspace_routes(app, services) -> None:
     def agent_tools(probe: bool = False):
         """模型能用的工具清单（界面展示用，也用来解释它为什么选了某个）。"""
         return {"tools": agent_runtime.tool_catalog(probe=probe)}
+
+    # ── 长期记忆：文件在哪、写了什么 ──────────────────────
+    @app.get("/memory")
+    def memory_inventory():
+        """记忆都存在磁盘上，这里只列清单，界面点开再看内容。"""
+        return {"root": str(longterm.root()), "files": longterm.inventory()}
+
+    @app.get("/memory/file")
+    def memory_read_file(name: str):
+        try:
+            return {"name": name, "content": longterm.read_file(name), "path": str(longterm.resolve(name))}
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.put("/memory/file")
+    def memory_write_file(name: str, payload: MemoryWriteInput):
+        try:
+            return longterm.write_file(name, payload.content)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/memory/log")
+    def memory_log(payload: MemoryWriteInput):
+        return longterm.append_log(payload.content, payload.course_id)
+
+    @app.get("/memory/digest")
+    def memory_digest(course_id: str = ""):
+        """模型实际看到的那段记忆摘要——排查"它怎么不记得"时看这个。"""
+        return {"digest": longterm.digest(course_id)}
 
     @app.get("/workspace/skills")
     def workspace_skills(q: str = ""):

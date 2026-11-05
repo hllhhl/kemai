@@ -52,6 +52,9 @@ SYSTEM = """你是一个会用工具的课程助手。每一步只输出一个 J
 - 先想清楚缺什么信息，再决定调哪个工具；能直接回答就别调。
 - **不要问用户"要不要我查一下"**：能查就直接查，查完再说结论。只有真的缺关键信息（比如没说清是哪一章）才问。
 - 数量、字数、条数这类信息一律引用工具返回的数字，不确定就说"没查到"，不要估算。
+- **长期记忆已经附在本提示词末尾**（我是谁 / 怎么做 / 关于用户 / 跨课程 / 这门课）。
+  回答"我习惯怎样""我是谁"这类问题时直接引用它，不要为此调用 memory_read；
+  只有需要某个文件全文时才读。
 - 工具失败时看错误信息决定换一个还是直接告诉用户，不要重复同一个调用。
 - 回答用中文，写明依据来自哪个工具的输出；工具没给的信息不要编。
 - 不确定时用 final 说明缺什么，不要硬凑。
@@ -202,14 +205,24 @@ def _skill_lines() -> list[str]:
         return []
 
 
-def _system_prompt() -> str:
+def _system_prompt(course_id: str = "") -> str:
     catalog = tool_catalog(probe=False)
     tools = "\n".join(
         f"- {t['name']}{'（只读）' if t['read_only'] else ''}: {t['description']}" for t in catalog
     ) or "（当前没有已连接的 MCP 工具）"
     skills = "\n".join(_skill_lines()) or "（没有技能）"
     # 不能用 str.format：提示词里的 JSON 示例带花括号，会被当成占位符
-    return SYSTEM.replace("__TOOLS__", tools).replace("__SKILLS__", skills)
+    prompt = SYSTEM.replace("__TOOLS__", tools).replace("__SKILLS__", skills)
+    try:
+        from . import longterm
+
+        memo = longterm.digest(course_id)
+    except Exception:  # noqa: BLE001 - 记忆坏了也不能让 agent 起不来
+        memo = ""
+    if memo:
+        # 放最后：越靠近当前问题，模型越会拿它当真；放最前面容易被长工具清单冲淡
+        prompt += "\n\n# 长期记忆（用户可编辑的文件，按此执行）\n" + memo
+    return prompt
 
 
 # ── 执行一个工具调用 ──────────────────────────────────────
@@ -226,7 +239,9 @@ def _assess(tool_name: str, catalog: list[dict]) -> dict:
     if entry is None:
         return {"risk": "sensitive", "decision": DENY, "reason": "这个工具不在已连接清单里"}
 
-    kind = "delete" if entry["destructive"] else ("finder" if entry["read_only"] else "practice")
+    kind = entry.get("risk_type") or (
+        "delete" if entry["destructive"] else ("finder" if entry["read_only"] else "practice")
+    )
     verdict = sentinel().assess({"type": kind})
     if tool_name.startswith("kemai."):
         # 内置工具的风险是固定的（写死在这里），不像 MCP 那样靠 annotations 自报
@@ -388,7 +403,7 @@ def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
     run = AgentRun(goal, course_id, max_turns, conversation_id)
     # 历史放在 system 之后、本次问题之前：模型看得到"上次聊到哪"，
     # 但本次的工具结果仍然排在最后，优先于旧记忆
-    run.messages = [{"role": "system", "content": _system_prompt()}]
+    run.messages = [{"role": "system", "content": _system_prompt(course_id)}]
     run.messages.extend(_history(conversation_id))
     run.messages.append({"role": "user", "content": goal})
     _runs[run.id] = run

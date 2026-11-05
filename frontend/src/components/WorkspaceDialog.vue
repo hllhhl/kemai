@@ -9,7 +9,7 @@ type Skill = { name: string; description: string; path: string; chars: number; a
 const props = defineProps<{ open: boolean; courseId?: string }>()
 const emit = defineEmits<{ close: [] }>()
 
-const tab = ref<'mcp' | 'skills' | 'agent'>('mcp')
+const tab = ref<'mcp' | 'skills' | 'agent' | 'memory'>('mcp')
 const loading = ref(false)
 const servers = ref<Server[]>([])
 const skills = ref<Skill[]>([])
@@ -107,6 +107,54 @@ async function saveMcp() {
     importError.value = e instanceof Error ? e.message : String(e)
   } finally {
     importing.value = ''
+  }
+}
+
+// ── 长期记忆：文件清单与编辑 ───────────────────────────
+type MemoFile = { name: string; bytes: number; modified: string }
+const memoFiles = ref<MemoFile[]>([])
+const memoRoot = ref('')
+const memoName = ref('')
+const memoText = ref('')
+const memoBusy = ref(false)
+const memoSaved = ref('')
+
+async function loadMemory() {
+  try {
+    const payload = await api<{ root: string; files: MemoFile[] }>('/memory')
+    memoRoot.value = payload.root
+    memoFiles.value = payload.files
+  } catch (e) {
+    importError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function openMemory(name: string) {
+  memoSaved.value = ''
+  try {
+    const payload = await api<{ content: string }>(`/memory/file?name=${encodeURIComponent(name)}`)
+    memoName.value = name
+    memoText.value = payload.content
+  } catch (e) {
+    importError.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function saveMemory() {
+  if (!memoName.value) return
+  memoBusy.value = true
+  memoSaved.value = ''
+  try {
+    await api(`/memory/file?name=${encodeURIComponent(memoName.value)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content: memoText.value }),
+    })
+    memoSaved.value = '已保存，下次对话就按这个来'
+    await loadMemory()
+  } catch (e) {
+    importError.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    memoBusy.value = false
   }
 }
 
@@ -395,6 +443,7 @@ watch(() => props.open, (value) => {
         <button :class="['ws-tab', { on: tab === 'mcp' }]" @click="tab = 'mcp'">MCP 工具 <span class="ws-count">{{ enabled.length }}</span></button>
         <button :class="['ws-tab', { on: tab === 'skills' }]" @click="tab = 'skills'">技能包 <span class="ws-count">{{ skills.length }}</span></button>
         <button :class="['ws-tab', { on: tab === 'agent' }]" @click="tab = 'agent'; loadTools()">让 Agent 自己查</button>
+        <button :class="['ws-tab', { on: tab === 'memory' }]" @click="tab = 'memory'; loadMemory()">长期记忆</button>
       </div>
 
       <p v-if="error" class="ws-error">{{ error }}</p>
@@ -534,6 +583,32 @@ watch(() => props.open, (value) => {
         </div>
       </div>
 
+      <div v-else-if="tab === 'memory'" class="ws-body ws-body-skills">
+        <section class="ws-import">
+          <div class="ws-import-head">
+            <strong>记忆文件</strong>
+            <small>都是磁盘上的 Markdown，改了立刻生效</small>
+          </div>
+          <p class="ws-memo-root">{{ memoRoot }}</p>
+          <div class="ws-memo-list">
+            <button v-for="file in memoFiles" :key="file.name"
+                    :class="['ws-memo-row', { on: memoName === file.name }]" @click="openMemory(file.name)">
+              <span class="ws-memo-name">{{ file.name }}</span>
+              <span class="ws-memo-meta">{{ file.bytes }} 字节</span>
+            </button>
+          </div>
+        </section>
+        <section v-if="memoName" class="ws-memo-edit">
+          <div class="ws-result-head">
+            <span>{{ memoName }}</span>
+            <button class="button primary small" :disabled="memoBusy" @click="saveMemory">{{ memoBusy ? '保存中…' : '保存' }}</button>
+          </div>
+          <textarea v-model="memoText" class="ws-memo-text" spellcheck="false"></textarea>
+          <p v-if="memoSaved" class="ws-ok">{{ memoSaved }}</p>
+        </section>
+        <p v-else class="muted small">左边选一个文件看内容。IDENTITY 是我是谁，SOUL 是怎么做事，USER 是关于你。</p>
+      </div>
+
       <div v-else class="ws-body ws-body-skills">
         <section class="ws-import">
           <div class="ws-import-head">
@@ -571,6 +646,26 @@ watch(() => props.open, (value) => {
 </template>
 
 <style scoped>
+.ws-memo-root { margin: 0 0 8px; font: 11.5px/1.5 ui-monospace, Consolas, monospace; color: var(--muted); word-break: break-all; }
+.ws-memo-list { display: flex; flex-direction: column; gap: 2px; }
+.ws-memo-row { display: flex; justify-content: space-between; gap: 8px; border: 0; background: transparent; border-radius: 7px; padding: 7px 9px; cursor: pointer; text-align: left; font: inherit; font-size: 12.5px; color: #53617b; }
+.ws-memo-row:hover { background: var(--surface); color: var(--ink); }
+.ws-memo-row.on { background: var(--surface); color: var(--accent-dark); font-weight: 600; }
+.ws-memo-name { font-family: ui-monospace, Consolas, monospace; }
+.ws-memo-meta { font-size: 11px; color: var(--muted); flex: none; }
+.ws-memo-edit { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.ws-memo-text { flex: 1; min-height: 320px; width: 100%; font: 12.5px/1.7 ui-monospace, Consolas, monospace; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); resize: vertical; }
+
+.ws-memo-root { margin: 0 0 8px; font: 11.5px/1.5 ui-monospace, Consolas, monospace; color: var(--muted); word-break: break-all; }
+.ws-memo-list { display: flex; flex-direction: column; gap: 2px; }
+.ws-memo-row { display: flex; justify-content: space-between; gap: 8px; border: 0; background: transparent; border-radius: 7px; padding: 7px 9px; cursor: pointer; text-align: left; font: inherit; font-size: 12.5px; color: #53617b; }
+.ws-memo-row:hover { background: var(--surface); color: var(--ink); }
+.ws-memo-row.on { background: var(--surface); color: var(--accent-dark); font-weight: 600; }
+.ws-memo-name { font-family: ui-monospace, Consolas, monospace; }
+.ws-memo-meta { font-size: 11px; color: var(--muted); flex: none; }
+.ws-memo-edit { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.ws-memo-text { flex: 1; min-height: 320px; width: 100%; font: 12.5px/1.7 ui-monospace, Consolas, monospace; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); resize: vertical; }
+
 .ws-server-remove { font-size: 11px; color: var(--danger); padding: 1px 6px; border-radius: 5px; cursor: pointer; }
 .ws-server-remove:hover { background: var(--danger-soft); }
 
