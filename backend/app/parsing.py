@@ -343,7 +343,15 @@ def _parse_pptx(path: Path, filename: str, visual=None, image_dir=None) -> Parse
     result.warnings.append("PPTX 读取正文、表格、图片 OCR 及 Office 公式；图表数据、嵌入对象和演讲者备注未纳入。")
     for slide_number, slide in enumerate(presentation.slides, start=1):
         title_shape = slide.shapes.title
-        heading = _clean_text(_pptx_frame_text(title_shape.text_frame)) if title_shape is not None else None
+        # A title placeholder does not always hold text: PowerPoint happily
+        # puts a table or other graphic frame in it, and those objects have no
+        # text_frame at all. Ask before touching it, or one such slide kills
+        # the whole deck.
+        heading = (
+            _clean_text(_pptx_frame_text(title_shape.text_frame))
+            if title_shape is not None and getattr(title_shape, "has_text_frame", False)
+            else None
+        )
         heading = heading or None
         with_text = False
         unsupported_count = 0
@@ -835,6 +843,26 @@ def _parse_tika(path: Path, filename: str, visual=None, image_dir=None) -> Parse
     return result
 
 
+def _failure_message(filename: str, error: BaseException) -> str:
+    """Keep the user-facing text friendly but stop hiding why parsing died.
+
+    Every reader raises something different (BadZipFile when a .pptx is really
+    a .doc, KeyError when a slide XML lacks an expected part, ...). Collapsing
+    them all into one sentence left both the user and the log with nothing to
+    act on, so the exception type and a short reason now travel with the
+    message while the full traceback goes to the log.
+    """
+    logger.warning("解析失败 %s：%s", filename, error, exc_info=True)
+    text = " ".join(str(error).split())
+    if len(text) > 120:
+        text = text[:120] + "…"
+    detail = f"{type(error).__name__}: {text}" if text else type(error).__name__
+    return (
+        "文件解析失败，可能损坏、格式与扩展名不符或包含不支持的结构。"
+        f"（技术原因：{detail}）请重新导出后上传。"
+    )
+
+
 def parse_document(path: Path, filename: str, visual=None, *, image_dir=None) -> ParseResult:
     """Read supported documents, text and images or raise a readable error.
 
@@ -865,9 +893,9 @@ def parse_document(path: Path, filename: str, visual=None, *, image_dir=None) ->
     except ValueError as exc:
         if suffix == ".pdf" and ("PDF 已加密" in str(exc) or "PDF 需要密码" in str(exc)):
             raise
-        raise ValueError("文件解析失败，可能损坏、格式与扩展名不符或包含不支持的结构。请重新导出后上传。") from exc
+        raise ValueError(_failure_message(filename, exc)) from exc
     except Exception as exc:
-        raise ValueError("文件解析失败，可能损坏、格式与扩展名不符或包含不支持的结构。请重新导出后上传。") from exc
+        raise ValueError(_failure_message(filename, exc)) from exc
     if not result.blocks:
         for warning in result.warnings:
             logger.debug("%s: %s", filename, warning)

@@ -203,3 +203,89 @@ def test_textless_office_documents_are_rejected(tmp_path: Path, suffix: str) -> 
     document.save(str(path))
     with pytest.raises(ValueError, match="未提取到可用内容"):
         parse_document(path, path.name)
+
+
+def test_pptx_title_placeholder_holding_a_table(tmp_path):
+    """PowerPoint lets a table sit in the title placeholder.
+
+    Such a frame is a PlaceholderGraphicFrame with no ``text_frame``; reading it
+    blindly used to abort the whole deck with an AttributeError. The slide's
+    table must still come through as content.
+    """
+    from pptx.oxml.ns import qn
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    table = slide.shapes.add_table(2, 2, Inches(1), Inches(1), Inches(4), Inches(2)).table
+    table.cell(0, 0).text = "门电路"
+    table.cell(0, 1).text = "传输延迟"
+    nv = table._graphic_frame._element.find(qn("p:nvGraphicFramePr"))
+    nv_pr = nv.find(qn("p:nvPr"))
+    if nv_pr is None:
+        nv_pr = nv.makeelement(qn("p:nvPr"), {})
+        nv.append(nv_pr)
+    nv_pr.insert(0, nv_pr.makeelement(qn("p:ph"), {"type": "title"}))
+    path = tmp_path / "title-table.pptx"
+    presentation.save(str(path))
+
+    result = parse_document(path, path.name)
+
+    text = "\n".join(block.text for block in result.blocks)
+    assert "门电路" in text and "传输延迟" in text
+
+
+def test_parse_failure_reports_the_technical_reason(tmp_path):
+    """The friendly message must still carry why parsing actually died."""
+    path = tmp_path / "not-really.pptx"
+    path.write_bytes(b"this is plain text wearing a pptx extension")
+
+    with pytest.raises(ValueError) as info:
+        parse_document(path, path.name)
+
+    message = str(info.value)
+    assert "请重新导出后上传" in message
+    assert "技术原因" in message
+    assert "PackageNotFoundError" in message
+
+
+def test_pptx_title_placeholder_holding_a_table(tmp_path):
+    """PowerPoint lets a table sit in the title placeholder.
+
+    Such a frame is a PlaceholderGraphicFrame with no ``text_frame``; reading it
+    blindly used to abort the whole deck with an AttributeError. The slide's
+    table must still come through as content.
+    """
+    from pptx.oxml.ns import qn
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    table = slide.shapes.add_table(2, 2, Inches(1), Inches(1), Inches(4), Inches(2)).table
+    table.cell(0, 0).text = "门电路"
+    table.cell(0, 1).text = "传输延迟"
+    nv = table._graphic_frame._element.find(qn("p:nvGraphicFramePr"))
+    nv_pr = nv.find(qn("p:nvPr"))
+    if nv_pr is None:
+        nv_pr = nv.makeelement(qn("p:nvPr"), {})
+        nv.append(nv_pr)
+    nv_pr.insert(0, nv_pr.makeelement(qn("p:ph"), {"type": "title"}))
+    path = tmp_path / "title-table.pptx"
+    presentation.save(str(path))
+
+    result = parse_document(path, path.name)
+
+    text = "\n".join(block.text for block in result.blocks)
+    assert "门电路" in text and "传输延迟" in text
+
+
+def test_parse_failure_reports_the_technical_reason(tmp_path):
+    """The friendly message must still carry why parsing actually died."""
+    path = tmp_path / "not-really.pptx"
+    path.write_bytes(b"this is plain text wearing a pptx extension")
+
+    with pytest.raises(ValueError) as info:
+        parse_document(path, path.name)
+
+    message = str(info.value)
+    assert "请重新导出后上传" in message
+    assert "技术原因" in message
+    assert "PackageNotFoundError" in message
