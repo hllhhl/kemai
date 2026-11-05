@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+from .sentinel import ALLOW, ASK, DENY, sentinel
+
 import re
 
 # 需要模型才能执行的动作
@@ -129,6 +131,8 @@ def plan(message: str, context: dict) -> dict:
             "body": {},
             "needs_model": True,
             "seconds": 60,
+            # 已经有笔记时这条会覆盖旧版本，交给哨兵抬成"先问一句"
+            "overwrites": bool(context.get("has_outline")),
         })
 
     if wants_practice:
@@ -154,6 +158,7 @@ def plan(message: str, context: dict) -> dict:
             },
             "needs_model": True,
             "seconds": 40,
+            "overwrites": bool(context.get("has_practice")),
         })
 
     if wants_finder:
@@ -207,6 +212,21 @@ def plan(message: str, context: dict) -> dict:
         if not action["ready"] and action["blocked_reason"] not in reasons:
             reasons.append(action["blocked_reason"])
 
+    # 哨兵：每条动作带上风险与结论。判定放在 ready 之后，
+    # 因为一个跑不动的动作问「要不要执行」是废话。
+    for action in actions:
+        verdict = sentinel().assess(
+            action,
+            {"overwrites": bool(action.get("overwrites"))},
+        )
+        action.update(verdict)
+        if verdict["decision"] == DENY:
+            action["ready"] = False
+            action["blocked_reason"] = verdict["reason"]
+
+    needs_confirm = [a for a in actions if a["decision"] == ASK and a["ready"]]
+    denied = [a for a in actions if a["decision"] == DENY]
+
     if reasons:
         hint = "；".join(reasons) + "。"
         if any("模型" in r for r in reasons):
@@ -227,4 +247,7 @@ def plan(message: str, context: dict) -> dict:
         "hint": hint,
         "blocked": blocked,
         "reasons": reasons,
+        # 需要用户点头的动作数：界面据此显示"这 2 步会改东西"
+        "needs_confirm": len(needs_confirm),
+        "denied": len(denied),
     }

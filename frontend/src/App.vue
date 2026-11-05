@@ -21,11 +21,12 @@ import CourseFinderPanel from './components/CourseFinderPanel.vue'
 import BiliLoginDialog from './components/BiliLoginDialog.vue'
 import WorkspaceDialog from './components/WorkspaceDialog.vue'
 import ConciergeDock from './components/ConciergeDock.vue'
+import TaskPanel from './components/TaskPanel.vue'
 import UiIcon from './components/UiIcon.vue'
 import TokenUsage from './components/TokenUsage.vue'
 import { uploadAccept, uploadFormatsLabel } from './uploadFormats'
 
-type Section = 'library' | 'outline' | 'space' | 'practice' | 'wrong' | 'finder'
+type Section = 'task' | 'library' | 'outline' | 'space' | 'practice' | 'wrong' | 'finder'
 const section = ref<Section>('library')
 const courses = ref<Course[]>([])
 const courseId = ref('')
@@ -43,6 +44,9 @@ const modelSettingsOpen = ref(false)
 const memoryOpen = ref(false)
 const biliLoginOpen = ref(false)
 const workspaceOpen = ref(false)
+const selectedTaskId = ref('')
+const tasks = ref<{ id: string; title: string; status: string; created_at: string }[]>([])
+const taskBusy = ref(false)
 const biliLoggedIn = ref(false)
 const memoryBusy = ref(false)
 const practiceBusy = ref(false)
@@ -99,6 +103,11 @@ let pollTimer: ReturnType<typeof setInterval> | undefined
 let pollInFlight = false
 let pollCount = 0
 let courseGeneration = 0
+// 「新建任务」在侧栏顶部单独占一块，不跟功能列表混在一起
+const navSections = computed(() =>
+  Object.fromEntries(Object.entries(sectionMeta).filter(([key]) => key !== 'task')),
+)
+
 const readyCount = computed(() => documents.value.filter(document => document.status === 'ready').length)
 const spaceMaterialsReady = computed(() => documents.value.some(document => document.status === 'ready' && ['lecture', 'note'].includes(document.kind)))
 const unitCount = computed(() => documents.value.reduce((sum, document) => sum + (document.units_with_text || 0), 0))
@@ -110,6 +119,7 @@ const courseSwitchBusy = computed(() => spaceBusy.value || memoryBusy.value || i
 const chapterControlsBusy = computed(() => chapterBusy.value || courseLoading.value || indexRepairBusy.value || uploadBusy.value || processingCount.value > 0 || !!documentBusy.value || outlineBusy.value || !!activeJob.value || chatting.value || managementBusy.value)
 const canChat = computed(() => !memoryBusy.value && modelConfigured.value && (readyCount.value > 0 || !!currentChatContext.value || !!currentNoteContext.value) && !indexRepairRequired.value && !indexRepairBusy.value && !courseLoading.value && !messagesLoading.value && !managementBusy.value && !chapterBusy.value && !newSessionBusy.value)
 const sectionMeta: Record<Section, { title: string; intro: string; label: string }> = {
+  task: { title: '新建任务', intro: '说一句话，我拆成几步替你做；每一步都能看见它落到哪里。', label: '新建任务' },
   library: { title: '课程资料', intro: '上传课件、笔记和真题，确认章节后开始复习。', label: '资料库' },
   outline: { title: '复习笔记', intro: '按章节阅读知识重点，选中不理解的段落即可提问。', label: '复习笔记' },
   space: { title: '复习空间', intro: '写下目标，根据每次作答调整讲解和练习，按自己的节奏继续。', label: '复习空间' },
@@ -121,6 +131,26 @@ const statusLabels: Record<string, string> = { queued: '等待处理', processin
 function date(value: string) { const d = new Date(value); return Number.isNaN(d.getTime()) ? value : d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) }
 function errorText(error: unknown) { return error instanceof Error ? error.message : String(error) }
 function clearFeedback() { actionError.value = ''; success.value = '' }
+async function loadTasks() {
+  if (!courseId.value) { tasks.value = []; return }
+  try {
+    tasks.value = await api<{ id: string; title: string; status: string; created_at: string }[]>(
+      `/tasks?course_id=${encodeURIComponent(courseId.value)}&limit=20`)
+  } catch {
+    tasks.value = []
+  }
+}
+
+function openTask(id: string) {
+  selectedTaskId.value = id
+  section.value = 'task'
+}
+
+function newTask() {
+  selectedTaskId.value = ''
+  section.value = 'task'
+}
+
 async function refreshBiliStatus() {
   try {
     const status = await api<{ loggedIn: boolean }>('/bilibili/login/status')
@@ -235,7 +265,13 @@ async function loadCourse(id: string) {
   } catch (error) { if (generation === courseGeneration) setError(error) }
   finally { if (generation === courseGeneration) courseLoading.value = false }
 }
-watch(courseId, id => { if (id) localStorage.setItem('review-course-id', id); else localStorage.removeItem('review-course-id'); void loadCourse(id) })
+watch(courseId, id => {
+  if (id) localStorage.setItem('review-course-id', id)
+  else localStorage.removeItem('review-course-id')
+  selectedTaskId.value = ''
+  void loadTasks()
+  void loadCourse(id)
+})
 async function draftChapters() {
   if (!courseId.value || chapterControlsBusy.value) return
   const id = courseId.value
@@ -360,8 +396,22 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
     <a class="skip-link" href="#main-content">跳到主要内容</a>
     <aside class="sidebar course-sidebar">
       <a class="brand" href="#" @click.prevent="section = 'library'"><svg class="brand-mark" viewBox="0 0 36 40" aria-hidden="true" fill="none"><circle cx="6" cy="20" r="3" fill="currentColor"/><path d="M9 20h6M15 20l13-9M15 20h13M15 20l13 9" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/></svg><div><strong>课脉</strong><small>课程知识体系</small></div></a>
+      <div class="task-rail">
+        <button :class="['new-task-button', { active: section === 'task' && !selectedTaskId }]" @click="newTask">
+          <UiIcon name="task" /><span>新建任务</span>
+        </button>
+        <div v-if="tasks.length" class="task-history">
+          <p class="task-history-label">最近任务</p>
+          <button v-for="item in tasks" :key="item.id"
+                  :class="['task-history-row', { active: selectedTaskId === item.id }]"
+                  :title="item.title" @click="openTask(item.id)">
+            <span class="task-dot" :class="item.status" aria-hidden="true"></span>
+            <span class="task-history-title">{{ item.title }}</span>
+          </button>
+        </div>
+      </div>
       <div class="workspace-label">你的复习空间</div>
-      <nav class="main-nav" aria-label="主要功能"><button v-for="(item, key) in sectionMeta" :key="key" :class="['nav-item', { active: section === key }]" :aria-current="section === key ? 'page' : undefined" @click="section = key as Section"><UiIcon :name="key as Section" /><span>{{ item.label }}</span><span v-if="section === key" class="nav-active-dot" aria-hidden="true"></span></button></nav>
+      <nav class="main-nav" aria-label="主要功能"><button v-for="(item, key) in navSections" :key="key" :class="['nav-item', { active: section === key }]" :aria-current="section === key ? 'page' : undefined" @click="section = key as Section"><UiIcon :name="key as Section" /><span>{{ item.label }}</span><span v-if="section === key" class="nav-active-dot" aria-hidden="true"></span></button></nav>
       <div class="sidebar-courses">
         <div class="courses-heading"><strong>全部课程 <span class="count-badge">{{ courses.length }}</span></strong><button class="icon-button small" aria-label="新建课程" title="新建课程" :disabled="courseSwitchBusy" @click="newCourseOpen = !newCourseOpen">＋</button></div>
         <form v-if="newCourseOpen" class="sidebar-course-form" @submit.prevent="createCourse"><input v-model="newCourseName" aria-label="新课程名称" placeholder="输入课程名称" maxlength="100" :disabled="courseSwitchBusy" /><div><button class="button primary small" :disabled="courseSwitchBusy || !newCourseName.trim()">{{ creatingCourse ? '创建中…' : '创建' }}</button><button type="button" class="text-button" :disabled="creatingCourse" @click="newCourseOpen = false">取消</button></div></form>
@@ -372,8 +422,8 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
     </aside>
     <div class="workspace managed-workspace">
       <header class="topbar"><div class="breadcrumb"><span class="breadcrumb-course">{{ course?.name || '复习空间' }}</span><span class="breadcrumb-divider">/</span><span>{{ sectionMeta[section].label }}</span></div><div class="topbar-actions"><button class="button subtle small" @click="biliLoginOpen = true"><span class="bili-dot" :class="{ on: biliLoggedIn }"></span>B 站{{ biliLoggedIn ? '已登录' : '登录' }}</button><button v-if="courseId" class="button subtle small" @click="memoryOpen = true">记忆</button><button class="button subtle small" @click="workspaceOpen = true">工作区</button><button class="button subtle small" @click="modelSettingsOpen = true"><UiIcon name="settings" />模型配置</button><div :class="['health-pill', { offline: !!connectionError }]" :title="connectionError || '后端服务已连接'"><span></span>{{ initialLoading ? '连接中' : connectionError ? '服务未连接' : '服务已连接' }}</div></div></header>
-      <main id="main-content" tabindex="-1" class="main-content" :class="{ 'with-review-chat': courseId && section !== 'library' && section !== 'space' && section !== 'finder', 'review-space-content': courseId && (section === 'space' || section === 'finder') }">
-        <div v-if="section !== 'space' || !courseId" class="page-heading"><div><p class="course-caption">{{ course?.name || '从一门课程开始' }}</p><h1>{{ sectionMeta[section].title }}</h1><p>{{ sectionMeta[section].intro }}</p></div><div v-if="course" class="heading-note"><span>当前课程</span><strong>{{ readyCount }} 份资料可用于复习</strong></div></div>
+      <main id="main-content" tabindex="-1" class="main-content" :class="{ 'with-review-chat': courseId && section !== 'library' && section !== 'space' && section !== 'finder' && section !== 'task', 'review-space-content': courseId && (section === 'space' || section === 'finder') }">
+        <div v-if="(section !== 'space' && section !== 'task') || !courseId" class="page-heading"><div><p class="course-caption">{{ course?.name || '从一门课程开始' }}</p><h1>{{ sectionMeta[section].title }}</h1><p>{{ sectionMeta[section].intro }}</p></div><div v-if="course" class="heading-note"><span>当前课程</span><strong>{{ readyCount }} 份资料可用于复习</strong></div></div>
         <div v-if="connectionError" class="notice error" role="alert"><strong>无法连接服务</strong><span>{{ connectionError }}</span><button class="text-button" @click="initialise">重新连接</button></div>
         <div v-else-if="health && !modelConfigured" class="notice warning"><strong>聊天模型尚未配置</strong><span>资料上传与目录整理可以使用。点击“模型配置”，添加模型并填写 API Key 或登录订阅账号，保存后即可生成回答和复习笔记。</span><button class="text-button" @click="modelSettingsOpen = true">配置模型</button></div>
         <div v-if="health && !health.embedding_ready && documents.length && !indexRepairRequired" class="notice info"><span>检索模型将在需要时加载。已下载的模型直接从本地读取；尚未下载时需要联网获取模型文件。</span></div>
@@ -383,6 +433,16 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
         <div v-if="initialLoading || courseLoading" class="loading-bar">正在加载复习空间…</div>
         <section v-if="!courseId && !initialLoading" class="panel welcome-panel"><div class="welcome-art" aria-hidden="true"><span>资料</span><span>笔记</span><span>练习</span></div><h2>从第一门课程开始</h2><p>把课件、笔记和真题放在一起，随时阅读、练习和提问。</p><form @submit.prevent="createCourse"><input v-model="newCourseName" aria-label="新课程名称" placeholder="例如：数据结构" maxlength="100" /><button class="button primary" :disabled="creatingCourse || !newCourseName.trim()">{{ creatingCourse ? '创建中…' : '创建课程' }}</button></form></section>
 
+        <TaskPanel
+          v-if="section === 'task'"
+          :course-id="courseId"
+          :course-name="course?.name || ''"
+          :task-id="selectedTaskId"
+          @select-task="selectedTaskId = $event; loadTasks()"
+          @navigate="section = $event as Section"
+          @open-models="modelSettingsOpen = true"
+          @changed="loadTasks()"
+        />
         <template v-if="courseId && section === 'library'">
           <div class="stats-row"><div class="stat-card"><span>课程资料</span><strong>{{ documents.length }}<small>份</small></strong><p>{{ processingCount ? `${processingCount} 份正在处理` : '按类型组织课程内容' }}</p></div><div class="stat-card"><span>可用于复习</span><strong>{{ readyCount }}<small>份</small></strong><p>解析完成并已建立索引</p></div><div class="stat-card"><span>已提取原文</span><strong>{{ unitCount }}<small>处</small></strong><p>页、幻灯片或文档内容位置</p></div><div class="stat-card accent"><span>章节路线</span><strong>{{ knowledgeChapters.length }}<small>章</small></strong><p>{{ confirmed ? '目录已确认，准备好生成复习笔记' : '下一步：确认章节目录' }}</p></div></div>
           <section class="panel"><div class="section-top"><div><h2>上传与管理资料</h2><p class="muted">自动提取正文、图片文字和公式，保留原文位置。</p></div><span class="badge neutral">支持批量上传</span></div>
@@ -425,7 +485,7 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
         <WrongQuestionsPanel v-if="courseId && section === 'wrong'" :key="courseId" :course-id="courseId" :revision="wrongRevision" :discussion-busy="chatting || messagesLoading || courseLoading || managementBusy" :active-question-id="wrongContext?.wrong_question_id || ''" @busy="wrongBusy = $event" @change="wrongRevision++" @context-change="wrongContext = $event" />
 
           </div>
-          <aside class="review-chat panel review-chat-floating" aria-label="复习对话">
+          <aside v-if="section !== 'task'" class="review-chat panel review-chat-floating" aria-label="复习对话">
             <div class="chat-main">
               <header class="chat-top"><div><span class="chat-avatar">知</span><strong>复习对话</strong></div><button class="text-button" :disabled="chatting || newSessionBusy || courseLoading || managementBusy" @click="nameNewSession">＋ 新会话</button></header>
               <div class="chat-session-bar"><select :value="sessionId" aria-label="选择复习会话" :disabled="chatting || newSessionBusy || messagesLoading || managementBusy" @change="selectSession(($event.target as HTMLSelectElement).value)"><option v-if="!sessionId" value="">开始新的复习对话</option><option v-for="item in sessions" :key="item.id" :value="item.id">{{ item.title }}</option></select><button v-if="currentSession" class="text-button" :disabled="chatting || newSessionBusy || managementBusy" @click="renameSession(currentSession)">改名</button><button v-if="currentSession" class="text-button danger" :disabled="chatting || newSessionBusy || managementBusy" @click="deleteSession(currentSession)">删除</button></div>

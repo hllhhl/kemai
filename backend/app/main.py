@@ -22,7 +22,9 @@ from .agent import ReviewAgentService
 from .chat_answers import ChatAnswerGrounding
 from .config import Settings
 from .file_chapters import chapter_role, document_role
+from .docs_api import register_doc_routes
 from .finder_api import close_finder_client, register_finder_routes
+from .tasks_api import register_task_routes
 from .workspace_api import close_workspace, register_workspace_routes, warmup_workspace
 from .llm import ModelClient, ModelRuntimeError, model_failure_message
 from .models import AppMeta, Block, Chapter, ChatSession, Course, Document, Job, Message, Outline, PracticeQuestion, PracticeSet, new_id
@@ -1298,6 +1300,8 @@ def create_app(settings: Settings | None = None, embedder=None, llm=None):
     register_finder_routes(app, services)
     # 工作区：MCP 工具 + 技能包
     register_workspace_routes(app, services)
+    register_task_routes(app, services)
+    register_doc_routes(app, services)
     _watch_parent_process()
 
     # 桌面端（Electron）只需要一个进程：后端顺带把已构建的界面托管在同一个端口。
