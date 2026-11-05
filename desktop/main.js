@@ -15,11 +15,18 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const net = require('net');
 
 // 开发时根目录是项目目录；装成 exe 后是 resources 目录（extraResources 都放在这里）
 const ROOT = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '..');
-const PORT = Number(process.env.KEMAI_PORT || 8000);
-const BASE = `http://127.0.0.1:${PORT}`;
+// 端口不写死：安装版和开发版数据目录不同，同抢一个端口时后启动的那个会静默失败，
+// 界面还能开、接口还返回 200，只是数据是空的——看起来就像"所有功能都坏了"。
+// 所以默认自动挑端口，只有确认是"自己那份数据"才复用。
+const PREFERRED_PORT = Number(process.env.KEMAI_PORT || 0);
+const PORT_START = 8317;
+const DATA_HINT = path.join(ROOT, 'data');
+let PORT = 0;
+let BASE = '';
 const PYTHON_CANDIDATES = [
   // 随包分发的可重定位 Python（python-build-standalone + site-packages）
   path.join(ROOT, 'python', 'python.exe'),
@@ -71,6 +78,63 @@ function log(...args) {
   const line = `[课脉 +${sinceStart()}] ${args.join(' ')}`;
   console.log(line);
   if (logStream) logStream.write(`${line}\n`);
+}
+
+/** 读某个端口的 /health；没起来或不是我们的服务就返回 null。 */
+function probeHealth(port) {
+  return new Promise((resolve) => {
+    const request = http.get(`http://127.0.0.1:${port}/health`, { timeout: 1500 }, (response) => {
+      let body = '';
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => {
+        if (response.statusCode !== 200) return resolve(null);
+        try {
+          const payload = JSON.parse(body);
+          resolve(payload && payload.status === 'ok' ? payload : null);
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    request.on('timeout', () => { request.destroy(); resolve(null); });
+    request.on('error', () => resolve(null));
+  });
+}
+
+function portFree(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(false));
+    server.once('listening', () => server.close(() => resolve(true)));
+    server.listen(port, '127.0.0.1');
+  });
+}
+
+/**
+ * 决定这次用哪个端口。
+ *
+ * 优先复用：同一份 data 目录上的后端如果是上次没关掉的，直接用，省 8 秒启动。
+ * 但另一个实例（安装版 vs 开发版）占着端口时绝不能复用——它连的是另一个数据
+ * 目录，连上去会看到一个空库，然后所有功能都像坏了。
+ */
+async function resolvePort() {
+  if (PREFERRED_PORT) return PREFERRED_PORT;
+  for (let offset = 0; offset < 10; offset += 1) {
+    const port = PORT_START + offset;
+    const health = await probeHealth(port);
+    if (health) {
+      const sameData = !health.data_dir || path.resolve(health.data_dir) === path.resolve(DATA_HINT);
+      if (sameData) {
+        log(`复用已在运行的后端 :${port}（数据目录 ${health.data_dir || '未报告'}）`);
+        return port;
+      }
+      log(`:${port} 上是另一个实例（${health.data_dir}），换端口`);
+      continue;
+    }
+    if (await portFree(port)) return port;
+    log(`:${port} 被别的程序占用，换端口`);
+  }
+  return PORT_START;
 }
 
 function portOpen() {
@@ -245,6 +309,9 @@ html,body{height:100%;margin:0;background:#f4f6fb;color:#24324b;
 }
 
 async function boot() {
+  PORT = await resolvePort();
+  BASE = `http://127.0.0.1:${PORT}`;
+  log(`本次使用端口 ${PORT}`);
   log('开始启动后端');
   createWindow();
   log('窗口已创建');

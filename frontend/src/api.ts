@@ -2,7 +2,18 @@ import type { SSEEvent } from './sse'
 import { readSSE } from './sse'
 import type { NoteChatContext, PracticeChatContext } from './types'
 
-export const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '')
+// 后端端口由桌面外壳在启动时挑（8317 起，被占就往后找），所以不能写死。
+// 界面本来就是后端托管的，直接用当前页面的 origin；只有跑 vite dev server
+// （5173/4173）时才回落到本地默认端口。
+const DEV_PORTS = ['5173', '4173', '3000'];
+const servedByBackend =
+  typeof window !== 'undefined' &&
+  window.location.protocol.startsWith('http') &&
+  !DEV_PORTS.includes(window.location.port);
+export const API_BASE = (
+  import.meta.env.VITE_API_BASE_URL ||
+  (servedByBackend ? window.location.origin : 'http://127.0.0.1:8317')
+).replace(/\/$/, '')
 
 export class ApiError extends Error {
   constructor(message: string, public readonly status: number) {

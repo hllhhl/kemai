@@ -421,6 +421,9 @@ def create_app(settings: Settings | None = None, embedder=None, llm=None):
         return {"status": "ok", "llm_configured": bool(services.llm.configured),
                 "embedding_model": settings.embedding_model, "embedding_ready": services.retrieval.ready,
                 "embedding_index_compatible": services.retrieval.index_compatible,
+                # 桌面外壳靠它判断这个端口上的后端是不是"自己那份数据"：
+                # 安装版和开发版数据目录不同，认错了就会看到一个空库还以为是坏了。
+                "data_dir": str(settings.data_dir),
                 "index_repair_courses": [key.split(":", 1)[1] for key in repair_courses]}
 
     @app.get("/system/model-config")
