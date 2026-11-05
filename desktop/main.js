@@ -24,7 +24,10 @@ const ROOT = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '.
 // 所以默认自动挑端口，只有确认是"自己那份数据"才复用。
 const PREFERRED_PORT = Number(process.env.KEMAI_PORT || 0);
 const PORT_START = 8317;
-const DATA_HINT = path.join(ROOT, 'data');
+// 用户数据放用户目录，不要放安装目录：安装器覆盖 resources 时会把数据一起清掉，
+// 这是之前"装完变成空库"的根因。开发版和安装版共用这一份，也省得两边数据分叉。
+const DATA_DIR = path.join(app.getPath('userData'), 'data');
+const LEGACY_DATA_DIR = path.join(ROOT, 'data');
 let PORT = 0;
 let BASE = '';
 const PYTHON_CANDIDATES = [
@@ -123,7 +126,7 @@ async function resolvePort() {
     const port = PORT_START + offset;
     const health = await probeHealth(port);
     if (health) {
-      const sameData = !health.data_dir || path.resolve(health.data_dir) === path.resolve(DATA_HINT);
+      const sameData = !health.data_dir || path.resolve(health.data_dir) === path.resolve(DATA_DIR);
       if (sameData) {
         log(`复用已在运行的后端 :${port}（数据目录 ${health.data_dir || '未报告'}）`);
         return port;
@@ -182,6 +185,8 @@ function startBackend() {
         // 把当前 exe 路径交过去，后端以 ELECTRON_RUN_AS_NODE 模式启动它。
         KEMAI_NODE: process.execPath,
         KEMAI_NODE_ELECTRON: '1',
+        // 数据目录固定在用户目录，安装器覆盖 resources 时数据不受影响
+        DATA_DIR: DATA_DIR,
       },
     },
   );
@@ -308,7 +313,22 @@ html,body{height:100%;margin:0;background:#f4f6fb;color:#24324b;
   win.on('closed', () => { win = null; });
 }
 
+/** 老版本把数据放在安装目录，第一次跑新版本时搬过来。 */
+function migrateLegacyData() {
+  try {
+    const marker = path.join(DATA_DIR, 'review.db');
+    if (fs.existsSync(marker)) return;
+    if (!fs.existsSync(path.join(LEGACY_DATA_DIR, 'review.db'))) return;
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.cpSync(LEGACY_DATA_DIR, DATA_DIR, { recursive: true });
+    log(`已把旧数据搬到用户目录：${DATA_DIR}`);
+  } catch (error) {
+    log(`旧数据迁移失败（不影响使用，但可能需要重新配置）：${error.message}`);
+  }
+}
+
 async function boot() {
+  migrateLegacyData();
   PORT = await resolvePort();
   BASE = `http://127.0.0.1:${PORT}`;
   log(`本次使用端口 ${PORT}`);

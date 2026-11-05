@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>课脉 vs LobeHub：Agent 能力对照</title>
+<style>
+  :root { --ink:#1c2536; --muted:#6b7688; --line:#e3e8f0; --soft:#f5f7fb; --ok:#12805c; --okbg:#e7f6ef; --part:#a06a00; --partbg:#fff4dc; --no:#c0392b; --nobg:#fdecea; --accent:#3a5ccc; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:32px 28px 60px; background:#fff; color:var(--ink); font:14px/1.7 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; }
+  .wrap { max-width:1120px; margin:0 auto; }
+  h1 { font-size:24px; margin:0 0 6px; font-weight:650; }
+  .sub { color:var(--muted); font-size:13px; margin:0 0 26px; }
+  .sub b { color:var(--ink); font-weight:600; }
+  h2 { font-size:17px; margin:34px 0 12px; font-weight:650; border-bottom:1px solid var(--line); padding-bottom:8px; }
+  .shots { display:grid; grid-template-columns:repeat(2,1fr); gap:14px; }
+  .shot { border:1px solid var(--line); border-radius:10px; overflow:hidden; background:var(--soft); }
+  .shot img { width:100%; display:block; }
+  .shot p { margin:0; padding:9px 12px; font-size:12px; color:var(--muted); background:#fff; border-top:1px solid var(--line); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { background:var(--soft); font-weight:600; color:var(--muted); font-size:12px; }
+  td:first-child { width:24%; font-weight:600; }
+  td:nth-child(2) { width:41%; color:var(--muted); }
+  .tag { display:inline-block; min-width:62px; text-align:center; font-size:11.5px; padding:2px 9px; border-radius:10px; font-weight:600; white-space:nowrap; }
+  .ok { background:var(--okbg); color:var(--ok); }
+  .part { background:var(--partbg); color:var(--part); }
+  .no { background:var(--nobg); color:var(--no); }
+  .note { font-size:12px; color:var(--muted); display:block; margin-top:3px; }
+  .gap-grid { display:grid; grid-template-columns:repeat(2,1fr); gap:10px; }
+  .gap { border:1px solid var(--line); border-left:3px solid var(--no); border-radius:8px; padding:10px 12px; background:#fff; }
+  .gap b { font-size:13px; }
+  .gap span { display:block; font-size:12px; color:var(--muted); margin-top:2px; }
+  .gap.p1 { border-left-color:#c0392b; }
+  .gap.p2 { border-left-color:#a06a00; }
+  .gap.p3 { border-left-color:#8792a5; }
+  .gap.done { border-left-color:var(--ok); }
+  .gap.done b { color:var(--ok); }
+  .foot { margin-top:34px; padding:14px 16px; background:var(--soft); border-radius:10px; font-size:12.5px; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>课脉 vs LobeHub：Agent 能力对照</h1>
+  <p class="sub">对照对象：<b>lobehub/lobehub</b>（约 8.4 万星，聊天式 Agent 平台）。界面图为仓库 <code>public/screenshots/</code> 里的原图；能力清单来自 README 的 Features 段和 <code>src/features/</code> 下 <b>183 个真实功能模块</b>。课脉状态按当前已装版本（2026-11-05 22:01 构建）逐项核对。</p>
+
+  <h2>一、它的界面（4 张原图）</h2>
+  <div class="shots">
+    <div class="shot"><img src="shot-1.png" alt="主界面"><p>主界面：左侧会话/角色列表 + 搜索，中间聊天气泡，回答下方一排操作按钮与 Tokens 计数，底部输入框与 Send。</p></div>
+    <div class="shot"><img src="shot-2.png" alt="多模型选择"><p>多模型选择：按服务商分组列出模型，每项标上下文长度（4K / 16K / 128K）。</p></div>
+    <div class="shot"><img src="shot-3.png" alt="视觉识别"><p>多模态：图片输入与视觉理解，右侧还有 Agent 设定面板。</p></div>
+    <div class="shot"><img src="shot-4.png" alt="Agent 市场"><p>Agent 市场：可安装现成的角色 / 提示词代理，带标签分类。</p></div>
+  </div>
+
+  <h2>二、它的能力，逐项对课脉</h2>
+  <table>
+    <thead><tr><th>能力组</th><th>LobeHub 里对应的模块 / 表现</th><th>课脉</th><th>说明</th></tr></thead>
+    <tbody>
+      <tr><td>会话与消息</td><td>Conversation、MessageList、ChatInput、TopicManager、ChatMiniMap；会话列表可搜索、置顶、改名</td><td><span class="tag part">部分</span></td><td>聊天气泡、流式、停止、复制、工具轨迹、会话持久化与历史列表都有；缺重试、编辑消息、消息分支、会话搜索/置顶/重命名<span class="note">对应模块：Regenerate / EditingPopover / TopicManager / Favorites</span></td></tr>
+      <tr><td>模型</td><td>ModelSelect、ModelSwitchPanel、ProviderList、OllamaModelDownloader；按服务商分组、标上下文长度</td><td><span class="tag part">部分</span></td><td>底部下拉可切换已配置的全部模型，显示当前模型名；没有上下文长度标注、没有本地模型下载引导</td></tr>
+      <tr><td>工具与 MCP</td><td>MCP、MCPPluginDetail、Connectors、Integrations、PluginSettings、ToolSetting</td><td><span class="tag ok">有</span></td><td>18 个工具（8 个课程工具 + 8 个 ltspice MCP + 其他），5 个 MCP 服务器；已在 Agent 循环里真实调用</td></tr>
+      <tr><td>技能</td><td>SkillStore、SkillsList、AgentSkillEdit、AgentSkillDetail、CommunitySkillDetail、10000+ 技能库</td><td><span class="tag part">部分</span></td><td>21 个技能、渐进加载、质量检查、可在输入框插入；没有技能市场、编辑器、社区库</td></tr>
+      <tr><td>记忆</td><td>Memory、MemoryEntities、MemoryRules、MemoryContextStories、SelfLearning、白盒可编辑记忆</td><td><span class="tag part">部分</span></td><td>文件式记忆（IDENTITY/SOUL/MEMORY/课程/每日日志），可读可编辑，会话结束自动归档；没有实体抽取、记忆规则、持续学习</td></tr>
+      <tr><td>权限与安全</td><td>AgentPermission、GroupPermission、GlobalApprovalNotification、PagePermission、ResourcePermission</td><td><span class="tag ok">有</span></td><td>sentinel 三态 allow/ask/deny，敏感动作暂停等人确认，全部调用写 audit；循环守卫防重复调用</td></tr>
+      <tr><td>Agent 角色与设定</td><td>AgentBuilder、AgentSetting、AgentProfileCard、AgentIdentityModal、AgentArtworkStudio、AgentMarketSubmission</td><td><span class="tag no">没有</span></td><td>只有一个固定的「课脉」，不能创建/切换不同角色，也没有 Agent 市场</td></tr>
+      <tr><td>任务与计划</td><td>AgentTasks、AgentTaskManager、AgentGoals、Acceptance、TaskDock、RecommendTaskTemplates、DailyBrief</td><td><span class="tag no">没有</span></td><td>Agent 内部会自己循环调工具，但界面上看不到计划、待办、验收标准；也没有定时/每日简报</td></tr>
+      <tr><td>多 Agent 协作</td><td>AgentGroup、AddAgentMemberModal、ChiefAgent、HeterogeneousAgent、GroupChat、Parallel</td><td><span class="tag no">没有</span></td><td>一次只能跑一个 Agent run，没有群组和并行</td></tr>
+      <tr><td>文档与画布</td><td>Pages、PageEditor、EditorCanvas、FileTree、FileViewer、DocumentModal、CanvasStorage</td><td><span class="tag part">部分</span></td><td>能导出 Word/PPT、资料检索、原文依据跳转；没有可协作编辑的文档/画布</td></tr>
+      <tr><td>文件与工作区</td><td>Workspace、WorkspaceSetting、Projects、SandboxDrive、WorkingDirectory、ResourceManager</td><td><span class="tag no">没有</span></td><td>资料是「课程」维度，不是项目/工作区；没有沙箱文件系统</td></tr>
+      <tr><td>多模态</td><td>AttachmentInput、AudioPlayer、Generation、ArtworkStudio、Visual Recognition</td><td><span class="tag no">没有</span></td><td>能上传 PDF/Word/PPT，但 Agent 对话里不能贴图提问，没有语音输入/朗读、图片生成</td></tr>
+      <tr><td>命令与快捷键</td><td>CommandMenu、HotkeyHelperPanel、PromptTransform、SettingsSearch</td><td><span class="tag no">没有</span></td><td>只有 Enter 发送 / Shift+Enter 换行 / Esc 关菜单；没有命令面板和设置搜索</td></tr>
+      <tr><td>用量与计费</td><td>AgentUsage、AgentQuotaCalendar、Tokens 计数、SubscriptionAccounts</td><td><span class="tag part">部分</span></td><td>后端记录 token_usage，界面有 TokenUsage 组件，但聊天页没显示本次消耗</td></tr>
+      <tr><td>分享与导出</td><td>Share、ShareModal、SharePopover、DataImporter、HeteroSessionImport</td><td><span class="tag no">没有</span></td><td>能导出笔记为 Word/PPT，不能导出/分享对话，也不能导入别人的会话</td></tr>
+      <tr><td>多端与通道</td><td>Channels、AgentChannel、Messenger、MobileShell、DesktopBridge、IM Gateway</td><td><span class="tag no">没有</span></td><td>单机 Windows 桌面应用，没有移动端、IM 接入、远程唤醒</td></tr>
+      <tr><td>引导与设置</td><td>Onboarding、DesktopOnboarding、Settings、ProfileEditor、Theme、Recommendations</td><td><span class="tag no">没有</span></td><td>没有首次使用引导、外观设置、个性化推荐追问</td></tr>
+    </tbody>
+  </table>
+
+  <h2>三、对照后这一轮做了什么（8 项），还剩什么（4 项）</h2>
+  <p class="sub" style="margin-bottom:14px">已装版本 2026-11-05 23:26 构建。下面每一项都跑过真实请求或界面点击，不是计划。</p>
+  <div class="gap-grid">
+    <div class="gap done"><b>已完成 · 重试 / 重新生成</b><span>拿同一个问题重跑，旧回答收进「之前有 N 个回答版本」可展开对比</span></div>
+    <div class="gap done"><b>已完成 · 编辑已发送的消息</b><span>点气泡旁的笔改完重发，后面的对话链一起重来</span></div>
+    <div class="gap done"><b>已完成 · 本次 token 消耗</b><span>实测显示「35874 tokens / 6 次调用」，随 final 事件回界面</span></div>
+    <div class="gap done"><b>已完成 · 建议追问</b><span>回答后异步生成 3 条，实测返回「这3份资料分别是什么？」等</span></div>
+    <div class="gap done"><b>已完成 · 会话搜索 / 置顶 / 重命名</b><span>列表带搜索框，置顶排前，PATCH 落盘后重启仍生效</span></div>
+    <div class="gap done"><b>已完成 · 任务计划显示</b><span>运行中「第 N / M 步」，完成后「走了 N 步」，工具轨迹带编号</span></div>
+    <div class="gap done"><b>已完成 · 导出对话</b><span>顶部按钮生成 Markdown 下载</span></div>
+    <div class="gap done"><b>已完成 · 消息分支</b><span>重试保留旧版本，可展开对比</span></div>
+    <div class="gap p3"><b>剩余 · Agent 角色与技能市场</b><span>目前固定一个「课脉」，不能建不同专长角色或安装社区技能</span></div>
+    <div class="gap p3"><b>剩余 · 多 Agent 并行 / 群组</b><span>一次只能跑一个 run，复杂问题不能拆给几个 Agent 同时做</span></div>
+    <div class="gap p3"><b>剩余 · 图片输入与语音</b><span>不能截图直接问，也没有语音输入 / 朗读</span></div>
+    <div class="gap p3"><b>剩余 · 定时 / 每日简报 / IM 接入</b><span>没有人不在时自动跑、自动汇报的能力</span></div>
+  </div>
+
+  <div class="foot">
+    数据来源：GitHub API（<code>git/trees/main?recursive=1</code> 取 183 个 <code>src/features/</code> 一级模块；<code>readme</code> 取 Features 段；<code>contents</code> 取 4 张官方截图）。<br>
+    课脉侧状态按已安装版本逐项核对，不是计划清单。P0 四项是「对话基本功」，P1 是「用得顺」，P2 是「平台化」。
+  </div>
+</div>
+</body>
+</html>
