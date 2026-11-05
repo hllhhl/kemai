@@ -42,12 +42,14 @@
         "to": "decks"
       },
       {
-        "from": "../.venv",
-        "to": "venv",
+        "from": "../_runtime/python",
+        "to": "python",
         "filter": [
           "**/*",
           "!**/__pycache__/**",
-          "!**/*.pyc"
+          "!**/*.pyc",
+          "!**/test/**",
+          "!**/tests/**"
         ]
       }
     ],

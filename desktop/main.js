@@ -21,7 +21,9 @@ const ROOT = app.isPackaged ? process.resourcesPath : path.resolve(__dirname, '.
 const PORT = Number(process.env.KEMAI_PORT || 8000);
 const BASE = `http://127.0.0.1:${PORT}`;
 const PYTHON_CANDIDATES = [
-  path.join(ROOT, 'venv', 'Scripts', 'python.exe'),
+  // 随包分发的可重定位 Python（python-build-standalone + site-packages）
+  path.join(ROOT, 'python', 'python.exe'),
+  // 开发机上的 venv
   path.join(ROOT, '.venv', 'Scripts', 'python.exe'),
   path.join(path.resolve(__dirname, '..'), '.venv', 'Scripts', 'python.exe'),
 ];
