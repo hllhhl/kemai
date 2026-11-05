@@ -73,7 +73,14 @@ function startBackend() {
   backend = spawn(
     PYTHON,
     ['-u', '-m', 'uvicorn', 'app.main:app', '--app-dir', 'backend', '--host', '127.0.0.1', '--port', String(PORT)],
-    { cwd: ROOT, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
+    {
+      cwd: ROOT,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // 国内直连 huggingface.co 会超时，嵌入模型根本下不下来。
+      // 指到镜像后首次约 30 秒下完，之后走缓存。
+      env: { ...process.env, HF_ENDPOINT: process.env.HF_ENDPOINT || 'https://hf-mirror.com' },
+    },
   );
   backend.stdout.on('data', (chunk) => log(String(chunk).trim()));
   backend.stderr.on('data', (chunk) => log(String(chunk).trim()));
