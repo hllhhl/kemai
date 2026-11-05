@@ -20,8 +20,12 @@ import threading
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
+from sqlalchemy import select
+
 from . import skills as skill_store
+from .concierge import plan as build_plan
 from .mcp_client import McpError, hub
+from .models import Chapter, Course, Document
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +37,13 @@ class McpCallInput(BaseModel):
     timeout: float = Field(default=45.0, ge=1, le=300)
 
 
-def register_workspace_routes(app) -> None:
+class PlanInput(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    course_id: str = ""
+    chapter_id: str = ""
+
+
+def register_workspace_routes(app, services) -> None:
     @app.get("/workspace/overview")
     def workspace_overview(probe: bool = True):
         """MCP 服务器 + 技能清单。
@@ -84,6 +94,44 @@ def register_workspace_routes(app) -> None:
             "truncated": truncated,
             "chars": len(text),
         }
+
+    @app.post("/concierge/plan")
+    def concierge_plan(payload: PlanInput):
+        """一句话 → 一串动作。只出计划，不动手。
+
+        章节和资料状态从数据库现读，避免前端传错参数——
+        调度层出错最贵的代价是「在错误的章节上跑了一次生成」。
+        """
+        context: dict = {
+            "course_id": payload.course_id,
+            "chapter_id": payload.chapter_id,
+            "chapters": [],
+            "document_id": "",
+            "model_ready": bool(getattr(services.llm, "configured", False)),
+        }
+        if payload.course_id:
+            with services.sessions() as db:
+                course = db.get(Course, payload.course_id)
+                if course is None:
+                    raise HTTPException(404, "课程不存在")
+                chapters = db.scalars(
+                    select(Chapter).where(Chapter.course_id == payload.course_id)
+                    .order_by(Chapter.position)
+                ).all()
+                context["chapters"] = [
+                    {"id": c.id, "title": c.title, "index": index + 1}
+                    for index, c in enumerate(chapters)
+                ]
+                newest = db.scalar(
+                    select(Document).where(
+                        Document.course_id == payload.course_id,
+                        Document.kind == "lecture",
+                        Document.status == "ready",
+                    ).order_by(Document.created_at.desc())
+                )
+                if newest is not None:
+                    context["document_id"] = newest.id
+        return build_plan(payload.message, context)
 
     @app.get("/workspace/skills")
     def workspace_skills(q: str = ""):

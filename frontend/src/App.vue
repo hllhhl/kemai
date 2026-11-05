@@ -20,6 +20,7 @@ import KnowledgePointsPanel from './components/KnowledgePointsPanel.vue'
 import CourseFinderPanel from './components/CourseFinderPanel.vue'
 import BiliLoginDialog from './components/BiliLoginDialog.vue'
 import WorkspaceDialog from './components/WorkspaceDialog.vue'
+import ConciergeDock from './components/ConciergeDock.vue'
 import UiIcon from './components/UiIcon.vue'
 import TokenUsage from './components/TokenUsage.vue'
 import { uploadAccept, uploadFormatsLabel } from './uploadFormats'
@@ -446,6 +447,15 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
     <ManagementDialog v-if="management" :key="`${management.action}:${management.id}`" :title="management.title" :description="management.description" :initial-name="management.initialName" :confirm-text="management.confirmText" :danger="management.danger" :busy="managementBusy" :error="managementError" @close="management = null" @submit="submitManagement" />
     <BiliLoginDialog :open="biliLoginOpen" @close="biliLoginOpen = false" @changed="refreshBiliStatus" />
     <WorkspaceDialog :open="workspaceOpen" @close="workspaceOpen = false" />
+    <ConciergeDock
+      v-if="!initialLoading"
+      :course-id="courseId"
+      :course-name="course?.name || ''"
+      :chapter-id="''"
+      :model-configured="modelConfigured"
+      @navigate="section = $event as Section"
+      @open-models="modelSettingsOpen = true"
+    />
     <WorkspaceDialog :open="workspaceOpen" @close="workspaceOpen = false" />
   </div>
 </template>

@@ -1268,7 +1268,7 @@ def create_app(settings: Settings | None = None, embedder=None, llm=None):
     # PPT 反查整门课：路由单独成模块，避免 main.py 继续变长
     register_finder_routes(app, services)
     # 工作区：MCP 工具 + 技能包
-    register_workspace_routes(app)
+    register_workspace_routes(app, services)
 
     # 桌面端（Electron）只需要一个进程：后端顺带把已构建的界面托管在同一个端口。
     # 必须放在所有 API 路由之后、且挂在 "/"，否则会把接口吃掉。
