@@ -28,8 +28,13 @@ BRAND_BG = (164, 67, 42)      # #a4432a，与界面主色一致
 BRAND_FG = (255, 253, 248)
 
 
-def make_icon() -> Path:
+def make_icon(force: bool = False) -> Path:
+    """生成图标。已有设计稿时不覆盖——现在用的是 AI 出的三叉脉络版，
+    这个函数只是没图时的兜底（纯 PIL 画「课」字）。
+    """
     ASSETS.mkdir(parents=True, exist_ok=True)
+    if ICON.exists() and not force:
+        return ICON
     size = 256
     image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -180,7 +185,7 @@ def make_shortcut(target: Path) -> Path:
 
 
 def main() -> int:
-    icon = make_icon()
+    icon = make_icon(force='--force-icon' in sys.argv)
     print("图标：", icon)
     launcher = make_launcher()
     print("启动脚本：", launcher)
