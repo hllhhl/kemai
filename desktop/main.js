@@ -113,6 +113,11 @@ function startBackend() {
         HF_ENDPOINT: process.env.HF_ENDPOINT || 'https://hf-mirror.com',
         // 后端靠这个每隔几秒确认父进程还在，被强杀时能自己收尾，不留孤儿占端口
         KEMAI_PARENT_PID: String(process.pid),
+        // 模型调用走 model-runtime/bridge.mjs，需要一个 Node。
+        // 打包后的机器不一定装过 Node.js，而 Electron 本体就是 Node：
+        // 把当前 exe 路径交过去，后端以 ELECTRON_RUN_AS_NODE 模式启动它。
+        KEMAI_NODE: process.execPath,
+        KEMAI_NODE_ELECTRON: '1',
       },
     },
   );

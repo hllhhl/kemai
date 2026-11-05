@@ -114,3 +114,42 @@ def test_failure_message_admits_the_retries():
 
     limited = llm.model_failure_message(ModelRuntimeError("slow", 429))
     assert "重试 5 次" in limited
+
+
+def test_node_runtime_prefers_the_desktop_shell(monkeypatch, tmp_path):
+    """打包版不能要求用户另装 Node.js：desktop 传进来的 exe 优先于 PATH。"""
+    fake = tmp_path / "electron.exe"
+    fake.write_bytes(b"")
+    monkeypatch.setenv("KEMAI_NODE", str(fake))
+    monkeypatch.setenv("KEMAI_NODE_ELECTRON", "1")
+
+    node, extra = llm.node_runtime()
+
+    assert node == str(fake)
+    assert extra == {"ELECTRON_RUN_AS_NODE": "1"}
+
+
+def test_node_runtime_falls_back_to_path_in_development(monkeypatch):
+    monkeypatch.delenv("KEMAI_NODE", raising=False)
+    monkeypatch.setattr(llm.shutil, "which", lambda name: r"C:\nodejs\node.exe")
+
+    node, extra = llm.node_runtime()
+
+    assert node.endswith("node.exe")
+    assert extra == {}
+
+
+def test_missing_node_explains_what_to_do(monkeypatch):
+    monkeypatch.delenv("KEMAI_NODE", raising=False)
+    monkeypatch.setattr(llm.shutil, "which", lambda name: None)
+
+    with pytest.raises(ModelRuntimeError, match="未找到 Node.js"):
+        llm.node_runtime()
+
+
+def test_missing_bridge_names_the_missing_component(monkeypatch, tmp_path):
+    """报错要说清是打包缺文件，而不是含糊的「进程提前结束」。"""
+    monkeypatch.setattr(llm, "ROOT", tmp_path)
+
+    with pytest.raises(ModelRuntimeError, match="缺少模型运行组件"):
+        llm.bridge_script()

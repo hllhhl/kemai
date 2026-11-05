@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import queue
 import re
 import shutil
@@ -8,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from dataclasses import asdict
 from functools import lru_cache
+from pathlib import Path
 from threading import Thread
 from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
@@ -60,6 +62,37 @@ def retryable(error: Exception) -> bool:
 def backoff_seconds(attempt: int) -> float:
     """Wait before attempt number ``attempt + 1`` (1-based attempt just failed)."""
     return RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)]
+
+
+def node_runtime() -> tuple[str, dict]:
+    """Locate the Node.js that executes ``model-runtime/bridge.mjs``.
+
+    A packaged build cannot assume the machine has Node.js installed. Electron
+    itself is Node when ``ELECTRON_RUN_AS_NODE=1``, so the desktop shell passes
+    its own executable through ``KEMAI_NODE`` and we prefer that. A PATH lookup
+    stays as the fallback for `uv run` development sessions.
+    """
+    configured = (os.environ.get("KEMAI_NODE") or "").strip()
+    if configured and Path(configured).is_file():
+        extra = {"ELECTRON_RUN_AS_NODE": "1"} if os.environ.get("KEMAI_NODE_ELECTRON") == "1" else {}
+        return configured, extra
+    found = shutil.which("node")
+    if found:
+        return found, {}
+    raise ModelRuntimeError(
+        "未找到 Node.js，无法启动模型调用组件。打包版应自带运行环境；"
+        "如果是源码运行，请安装 Node.js 22.19 或更高版本后重启后端。"
+    )
+
+
+def bridge_script() -> Path:
+    """The model bridge shipped next to the backend, never inside a wheel cache."""
+    script = ROOT / "model-runtime" / "bridge.mjs"
+    if not script.is_file():
+        raise ModelRuntimeError(
+            f"缺少模型运行组件（{script}）。打包版应包含 model-runtime 目录，请重新安装课脉。"
+        )
+    return script
 
 
 def run_parallel(function, items, workers=MODEL_CONCURRENCY):
@@ -146,14 +179,13 @@ class ModelClient:
         return self.config_store.snapshot().configured
 
     def _events(self, request: dict, timeout: float):
-        node = shutil.which("node")
-        if not node:
-            raise ModelRuntimeError("未找到 Node.js。请安装 Node.js 22.19 或更高版本后重启后端。")
+        node, node_env = node_runtime()
         events = queue.Queue()
         process = subprocess.Popen(
-            [node, str(ROOT / "model-runtime" / "bridge.mjs")],
+            [node, str(bridge_script())],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             text=True, encoding="utf-8", cwd=ROOT,
+            env={**os.environ, **node_env},
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
