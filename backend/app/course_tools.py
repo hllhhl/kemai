@@ -44,6 +44,18 @@ def catalog() -> list[dict]:
     """给模型看的工具清单，格式和 MCP 工具一致，agent 循环不用特判。"""
     return [
         {
+            "name": "kemai.auto_course_notes",
+            "description": "一步到位：从零建课（或复用）→ 批量导入 B 站前 N 讲字幕 → 自动确认章节 → 生成完整复习笔记。用户说「没有课程，去 B 站找某门课并整理成笔记」时优先用这一个工具，不要拆成多步自己绕。会跑几分钟，请等它返回。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {
+                "course_name": {"type": "string", "description": "课程名"},
+                "bvid": {"type": "string", "description": "BV 号，先用 bili_search 拿到"},
+                "limit": {"type": "integer", "description": "导入前几讲，默认 3，最多 28"},
+                "wait_seconds": {"type": "integer", "description": "等笔记生成多久，默认 150"}},
+                "required": ["course_name", "bvid"]},
+        },
+        {
             "name": "kemai.course_create",
             "description": "从零建立一门课程。用户说「还没有课程」「帮我建一门课」时用；返回课程 id，后续工具会自动挂到这门课。没有选中课程时第一步就调它。",
             "read_only": True,  # 只新增、不覆盖任何已有内容，风险等同读操作
@@ -357,6 +369,7 @@ def _require():
 def call(name: str, args: dict, course_id: str) -> dict:
     """执行一个课程工具。返回 {ok, text}，和 MCP 的返回形状保持一致。"""
     handler = {
+        "kemai.auto_course_notes": _auto_course_notes,
         "kemai.course_create": _course_create,
         "kemai.frames_recent": _frames_recent,
         "kemai.bili_import_course": _bili_import_course,
@@ -395,7 +408,7 @@ def call(name: str, args: dict, course_id: str) -> dict:
     global _created_course
     if not course_id and _created_course:
         course_id = _created_course
-    COURSE_FREE = {"kemai.course_create", "kemai.frames_recent",
+    COURSE_FREE = {"kemai.auto_course_notes", "kemai.course_create", "kemai.frames_recent",
                    "kemai.bili_status", "kemai.bili_search",
                    "kemai.bili_parts", "kemai.bili_transcript",
                    "kemai.self_status", "kemai.fs_list", "kemai.fs_read",
@@ -937,4 +950,51 @@ def _frames_recent(args: dict, _course_id: str) -> dict:
                      f" | {row.get('frames')} 张 | 带图笔记 {row.get('note')}"
                      f" | 资料状态 {row.get('state')}")
     return {"ok": True, "text": "最近同步的画面：" + NL + NL.join(lines)}
+
+def _auto_course_notes(args: dict, course_id: str) -> dict:
+    """把「零课程 → 字幕 → 笔记」整条链路收进一次工具调用。
+
+    模型自己一步步编排时容易在 course_brief 上打转，或者做到一半就 final。
+    这类确定性的长流程应该由服务端一次跑完，模型只负责给课程名和 BV 号。
+    """
+    from .edu_frames import ensure_course
+
+    services = _require()
+    name = str(args.get("course_name") or "").strip()[:80] or "B站课程笔记"
+    bvid = str(args.get("bvid") or "").strip()
+    if not bvid:
+        # 模型经常漏传 bvid。与其让它再来一轮（往往还是漏），不如这里自己搜：
+        # 用课程名当关键词，取第一个有 BV 号的结果。
+        from .bilibili import BilibiliError
+
+        try:
+            with _bili_client() as client:
+                hits = client.search(name, limit=5)
+        except BilibiliError as exc:
+            return {"ok": False, "text": f"没传 bvid，自动搜课也失败了：{exc}。稍等 1-2 分钟再试，或手动把 BV 号给我。"}
+        for hit in hits or []:
+            candidate = str(hit.get("bvid") or "").strip()
+            if candidate:
+                bvid = candidate
+                break
+        if not bvid:
+            return {"ok": False, "text": f"自动搜「{name}」没找到带 BV 号的课程，请把 BV 号直接给我。"}
+    limit = max(1, min(int(args.get("limit") or 3), 28))
+    wait = max(10, min(int(args.get("wait_seconds") or 150), 150))
+
+    global _created_course
+    cid, created = ensure_course(services, name, course_id or _created_course)
+    _created_course = cid
+
+    imported = _bili_import_course({"bvid": bvid, "limit": limit, "course_name": name}, cid)
+    if not imported["ok"]:
+        return {"ok": False, "text": f"课程「{name}」已就绪，但字幕导入失败：" + imported["text"]}
+
+    note = _build({"wait_seconds": wait}, cid)
+    lines = [
+        f"课程「{name}」{'已新建' if created else '已存在'}，id={cid}。",
+        imported["text"],
+        note["text"],
+    ]
+    return {"ok": note["ok"], "text": NL.join(lines)}
 

@@ -55,7 +55,10 @@ SYSTEM = """你是一个会用工具的课程助手。每一步只输出一个 J
 规则：
 - 先想清楚缺什么信息，再决定调哪个工具；能直接回答就别调。
 - **不要问用户"要不要我查一下"**：能查就直接查，查完再说结论。只有真的缺关键信息（比如没说清是哪一章）才问。
-- 如果 course_brief 提示"当前没有选中的课程"，或者用户说还没建课，**只调一次 kemai.course_create 建课**（name 用用户说的课程名），然后立刻继续下一步，不要重复调用，也不要回来问用户。
+- 如果 course_brief 提示"当前没有选中的课程"，或者用户说还没建课、要从 B 站找课整理笔记：
+  **直接调一次 kemai.auto_course_notes**（只传 course_name，bvid 留空它自己会搜），
+  不要先调 course_brief，也不要自己拆成 course_create / bili_search / bili_import_course / notes_build 多步。
+  它一次跑完建课、导字幕、生成笔记，会花几分钟，等它返回再回答。
 - 数量、字数、条数这类信息一律引用工具返回的数字，不确定就说"没查到"，不要估算。
 - **长期记忆已经附在本提示词末尾**（我是谁 / 怎么做 / 关于用户 / 跨课程 / 这门课）。
   回答"我习惯怎样""我是谁"这类问题时直接引用它，不要为此调用 memory_read；
@@ -100,6 +103,7 @@ class AgentRun:
         # 本次运行的模型消耗（final 事件带给界面）
         self.usage: dict | None = None
         self.parse_failures = 0
+        self.halt_streak = 0
         self.turn = 0
         self.created_at = time.time()
 
@@ -438,8 +442,8 @@ def _assess(tool_name: str, catalog: list[dict]) -> dict:
 # 防的是一次查十个文件那种慢死循环。
 STREAK_WARN = 2
 STREAK_HALT = 3
-TOOL_WARN = 6
-TOOL_HALT = 10
+TOOL_WARN = 4
+TOOL_HALT = 6
 
 
 def note_call(run: "AgentRun", tool_name: str, signature: str) -> str:
@@ -632,16 +636,26 @@ def _turn(run: AgentRun, llm) -> str:
         # 失败计数管不到"成功了但没进展"。查两遍同一份课程简介，第二次纯属浪费一轮模型调用。
         guard = note_call(run, tool_name, signature)
         if guard == "halt":
-            # 以前只是"提醒"模型停手，它常常不听，一路空转到轮数上限。
-            # 重复到这个程度说明它已经卡死，强制收尾并如实说明，别再烧额度。
+            # 第一版直接把 answer 覆盖成"信息不足"，结果把前面已经成功的
+            # 导入/笔记全抹掉了。现在：先拦下这次工具调用，强令模型用已有
+            # 结果输出 final；只有连着两次还不听才强制结束，且不覆盖已有答案。
+            run.halt_streak += 1
             audit.record(tool=tool_name, args=args, decision="allow", ok=False, run_id=run.id,
                          conversation_id=run.conversation_id, course_id=run.course_id,
-                         error="循环守卫：重复调用已强制收尾")
-            run.status = "done"
-            run.answer = (f"这一步卡住了：{tool_name} 被反复调用，没有新进展，我已停止循环。"
-                          "目前拿到的信息不足以完成任务；常见原因是 B 站搜索被反爬拦截、"
-                          "或画面截图需要浏览器插件手动同步。请稍后重试，或先把资料/截图给我。")
-            return "done"
+                         error="循环守卫：重复调用已拦下，改用已有结果收尾")
+            if run.halt_streak >= 2:
+                run.status = "done"
+                if not run.answer:
+                    done_steps = [step.get("tool") for step in run.steps if step.get("tool")]
+                    run.answer = ("重复调用已停止。上面这些步骤已经执行完："
+                                  + "、".join(dict.fromkeys(done_steps)) +
+                                  "。请查看界面里的工具轨迹确认结果；还缺的部分可以再让我接着做。")
+                return "done"
+            _observe(run, tool_name,
+                     "这次工具调用已被循环守卫拦下，没有执行。不要再调任何工具，"
+                     "现在必须用上面已经拿到的结果输出 {\"action\": \"final\", \"answer\": \"...\"}，"
+                     "把已完成的事如实说清楚，不要说'信息不足'。")
+            return "continue"
         if guard == "warn":
             # 只提示不拦：第二次常常是换了说法的重试，拦掉可能丢掉本来拿得到的结果
             _observe(run, tool_name,
