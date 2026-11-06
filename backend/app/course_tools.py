@@ -860,27 +860,29 @@ def _bili_import_course(args: dict, course_id: str) -> dict:
     # notes_build 的前置校验要求 Chapter.confirmed 全为 true；批量导入既然
     # 已经把目录定下来了，就顺手确认，别再让用户多点一次「确认目录」。
     confirmed = 0
+    confirm_error = ""
     try:
+        from sqlalchemy import update as sa_update
+
         from .models import Chapter
 
         services = _require()
         with services.sessions() as db:
-            chapters = db.scalars(select(Chapter).where(Chapter.course_id == course_id)).all()
-            for chapter in chapters:
-                if not chapter.confirmed:
-                    chapter.confirmed = True
-                    confirmed += 1
-            if chapters:
-                services.changed(db, course_id)
-                db.commit()
-    except Exception:  # noqa: BLE001 - 确认失败不否定已导入的资料
-        pass
+            result = db.execute(sa_update(Chapter).where(
+                Chapter.course_id == course_id,
+                Chapter.confirmed.is_(None) | (Chapter.confirmed == False),  # noqa: E712
+            ).values(confirmed=True))
+            confirmed = result.rowcount or 0
+            db.commit()
+    except Exception as exc:  # noqa: BLE001 - 错误要带回来，不能静默吞掉
+        confirm_error = f"{type(exc).__name__}: {exc}"
 
     text = (f"已把 BV {bvid} 的前 {len(imported)} 讲字幕导入课程，共 {total} 字："
             + NL + NL.join(imported[:10]))
     if skipped:
         text += NL + "跳过：" + "；".join(skipped[:5])
-    text += NL + f"已按分 P 标题自动确认章节目录（{confirmed} 章更新）。"
+    text += NL + (f"已按分 P 标题自动确认章节目录（{confirmed} 章更新）。"
+                  if not confirm_error else f"章节自动确认失败：{confirm_error}")
     text += NL + NL + "现在调 kemai.notes_build 生成逐章复习笔记。"
     return {"ok": True, "text": text}
 
