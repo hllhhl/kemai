@@ -525,6 +525,9 @@ def _memory_log(args: dict, course_id: str) -> dict:
     return {"ok": True, "text": f"已记到 {result['path']}"}
 
 
+NL = chr(10)
+
+
 # ── B 站：让 Agent 真的能去找课、拿字幕，而不是说「没有这个接口」 ──
 
 
