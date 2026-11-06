@@ -15,7 +15,10 @@ NOTES_STYLE = "review_notes_v4_math"
 CHAPTER_POLICY = "file_sources_with_guidance_v3"
 GUIDANCE_STYLE = "course_guidance_v2"
 MAX_GUIDANCE_BYTES = 3000
-MAX_PROMPT_BYTES = 16000
+# 原来是 16000 字节（约 5000 汉字），按早期 8K 上下文模型设的。
+# 现在课脉默认模型 context_window=65536，中文 1 token 约 1.5~2 字节；
+# 留足系统提示和输出空间后取 48KB，够放下一整讲的口语字幕分批合并。
+MAX_PROMPT_BYTES = 48000
 BATCH_PROMPT_BYTES = MAX_PROMPT_BYTES - 512
 NO_CONTENT = "[NO_REVIEW_CONTENT]"
 NOTES_RULES = """你是课程复习笔记的编辑，依据输入资料编写学过一轮之后可以对照复习的 Markdown 笔记。
