@@ -17,6 +17,7 @@ MCP 工具再强，也只能查 LTspice、查文件——它不知道这门课�
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -40,6 +41,63 @@ MAX_NOTE_CHARS = 6000
 def catalog() -> list[dict]:
     """给模型看的工具清单，格式和 MCP 工具一致，agent 循环不用特判。"""
     return [
+        {
+            "name": "kemai.bili_status",
+            "description": "查 B 站登录态。AI 字幕和搜索都需要登录；没登录时会说明该去扫码。",
+            "read_only": True,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "kemai.bili_search",
+            "description": "在 B 站按课程名搜索视频课，返回标题、BV 号、UP 主和简介。用户说「找某门课」时先调它。",
+            "read_only": True,
+            "destructive": False,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "keyword": {"type": "string", "description": "课程名，如 模拟集成电路设计"},
+                    "limit": {"type": "integer", "description": "最多几条，默认 6"},
+                },
+                "required": ["keyword"],
+            },
+        },
+        {
+            "name": "kemai.bili_parts",
+            "description": "看一门 B 站课程的视频详情与分 P 列表（每一讲的 cid 和标题）。",
+            "read_only": True,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {"bvid": {"type": "string", "description": "BV 号"}}, "required": ["bvid"]},
+        },
+        {
+            "name": "kemai.bili_transcript",
+            "description": "取 B 站某一讲的字幕正文（带时间戳）。没有字幕时会给出原因和可用的兜底方式。",
+            "read_only": True,
+            "destructive": False,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "bvid": {"type": "string", "description": "BV 号"},
+                    "cid": {"type": "integer", "description": "分 P 的 cid，从 bili_parts 拿"},
+                    "limit": {"type": "integer", "description": "最多返回多少行字幕，默认 120"},
+                },
+                "required": ["bvid", "cid"],
+            },
+        },
+        {
+            "name": "kemai.course_import_text",
+            "description": "把一段字幕或讲义文本作为资料导入当前课程，之后才能生成有依据的复习笔记。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "要导入的正文"},
+                    "title": {"type": "string", "description": "资料名，如 第1讲 绪论"},
+                },
+                "required": ["text"],
+            },
+        },
         {
             "name": "kemai.course_brief",
             "description": "看这门课的骨架：章节、资料状态、笔记有没有、题库和错题各多少条。先调它再决定做什么。",
@@ -180,6 +238,11 @@ def _require():
 def call(name: str, args: dict, course_id: str) -> dict:
     """执行一个课程工具。返回 {ok, text}，和 MCP 的返回形状保持一致。"""
     handler = {
+        "kemai.bili_status": _bili_status,
+        "kemai.bili_search": _bili_search,
+        "kemai.bili_parts": _bili_parts,
+        "kemai.bili_transcript": _bili_transcript,
+        "kemai.course_import_text": _course_import_text,
         "kemai.course_brief": _brief,
         "kemai.notes_read": _notes,
         "kemai.practice_read": _practice,
@@ -460,3 +523,138 @@ def _memory_log(args: dict, course_id: str) -> dict:
         return {"ok": False, "text": "text 不能为空"}
     result = longterm.append_log(text, course_id)
     return {"ok": True, "text": f"已记到 {result['path']}"}
+
+
+# ── B 站：让 Agent 真的能去找课、拿字幕，而不是说「没有这个接口」 ──
+
+
+def _bili_auth_cookie() -> str:
+    from .bili_auth import get_auth
+    from .config import Settings
+
+    try:
+        return get_auth(Settings.from_env().data_dir).cookie()
+    except Exception:  # noqa: BLE001 - 没登录就匿名跑，别让工具起不来
+        return ""
+
+
+def _bili_client():
+    from .bilibili import BilibiliClient
+
+    return BilibiliClient(cookie=_bili_auth_cookie())
+
+
+def _bili_status(_args: dict, _course_id: str) -> dict:
+    from .bili_auth import get_auth
+    from .config import Settings
+
+    try:
+        status = get_auth(Settings.from_env().data_dir).status()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "text": f"读不到 B 站登录态：{type(exc).__name__}: {exc}"}
+    if status.get("loggedIn"):
+        return {"ok": True, "text": f"B 站已登录（{status.get('uname') or '未取到昵称'}）。可以搜索课程、取 AI 字幕。"}
+    return {"ok": True, "text": "B 站未登录。搜索可能被反爬拦截，AI 字幕取不到。请让用户到「B 站登录」扫码；"
+                               "或者用浏览器扩展在视频页面导出字幕后，把文本交给 kemai.course_import_text 入库。"}
+
+
+def _bili_search(args: dict, _course_id: str) -> dict:
+    from .bilibili import BilibiliError
+
+    keyword = str(args.get("keyword") or "").strip()
+    if not keyword:
+        return {"ok": False, "text": "keyword 不能为空"}
+    limit = max(1, min(int(args.get("limit") or 6), 12))
+    try:
+        with _bili_client() as client:
+            hits = client.search(keyword, limit=limit)
+    except BilibiliError as exc:
+        return {"ok": False, "text": f"B 站搜索失败：{exc}。先调 kemai.bili_status 看登录态；"
+                                     "被反爬时请用户登录或稍后再试，不要编造课程。"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "text": f"B 站搜索异常：{type(exc).__name__}: {exc}"}
+    if not hits:
+        return {"ok": True, "text": f"没搜到与「{keyword}」相关的课程"}
+    lines = []
+    for hit in hits[:limit]:
+        title = str(hit.get("title") or "").replace('<em class="keyword">', "").replace("</em>", "")
+        lines.append(f"- {title} | BV {hit.get('bvid')} | UP {hit.get('author') or ''} | {(hit.get('description') or '')[:60]}")
+    return {"ok": True, "text": "搜到 " + str(len(hits)) + " 门课：" + NL + NL.join(lines)}
+
+
+def _bili_parts(args: dict, _course_id: str) -> dict:
+    from .bilibili import BilibiliError
+
+    bvid = str(args.get("bvid") or "").strip()
+    if not bvid:
+        return {"ok": False, "text": "bvid 不能为空"}
+    try:
+        with _bili_client() as client:
+            video = client.view(bvid)
+    except BilibiliError as exc:
+        return {"ok": False, "text": f"读取视频失败：{exc}"}
+    pages = list(getattr(video, "pages", ()) or ())
+    lines = [f"课程：{getattr(video, 'title', '')} | BV {bvid} | 共 {len(pages)} 讲"]
+    for page in pages[:40]:
+        lines.append(f"- 第 {page.get('page', '?')} 讲 | cid={page.get('cid')} | {page.get('part', '')}")
+    return {"ok": True, "text": NL.join(lines)}
+
+
+def _bili_transcript(args: dict, _course_id: str) -> dict:
+    from .bilibili import BilibiliError
+
+    bvid = str(args.get("bvid") or "").strip()
+    try:
+        cid = int(args.get("cid") or 0)
+    except (TypeError, ValueError):
+        cid = 0
+    if not bvid or not cid:
+        return {"ok": False, "text": "需要 bvid 和 cid（先调 kemai.bili_parts）"}
+    limit = max(10, min(int(args.get("limit") or 120), 400))
+    try:
+        with _bili_client() as client:
+            result = client.transcript(bvid, cid)
+    except BilibiliError as exc:
+        return {"ok": False, "text": f"取字幕失败：{exc}"}
+    lines = result.get("lines") or []
+    if not lines:
+        diagnosis = result.get("diagnosis") or {}
+        return {"ok": True, "text": "这一讲没有可用字幕。" + str(diagnosis)[:200] +
+                                    "。AI 字幕需要 B 站登录；也可以让用户用浏览器扩展导出字幕文本，"
+                                    "再交给 kemai.course_import_text 入库。"}
+    picked = lines[:limit]
+    rows = []
+    for item in picked:
+        seconds = int(item.get("from", 0) or 0)
+        stamp = f"{seconds // 60:02d}:{seconds % 60:02d}"
+        rows.append(f"[{stamp}] {item.get('text', '')}")
+    body = NL.join(rows)[:6000]
+    return {"ok": True, "text": f"第 {len(picked)}/{len(lines)} 行字幕（BV {bvid} / cid {cid}）：" + NL + body +
+                               NL + NL + "要把这些字幕变成课程资料，调 kemai.course_import_text；"
+                               "之后调 kemai.notes_build 生成逐章复习笔记。"}
+
+
+def _course_import_text(args: dict, course_id: str) -> dict:
+    """把字幕/讲义正文写成资料，之后 notes_build 才有依据。"""
+    from .models import Document, new_id
+
+    services = _require()
+    text = str(args.get("text") or "").strip()
+    title = str(args.get("title") or "导入资料").strip()[:80]
+    if len(text) < 20:
+        return {"ok": False, "text": "正文太短（少于 20 字），不入库"}
+    document_id = new_id()
+    path = services.upload_dir / f"{document_id}.md"
+    path.write_text("# " + title + NL + NL + text, encoding="utf-8")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    with services.sessions() as db:
+        db.add(Document(id=document_id, course_id=course_id, filename=title + ".md",
+                        kind="note", file_hash=digest, path=str(path)))
+        services.changed(db, course_id)
+        db.commit()
+    try:
+        services.ingest_document(document_id)
+        state = "已解析并入库"
+    except Exception as exc:  # noqa: BLE001 - 解析失败也要告诉模型资料已经落盘
+        state = f"已落盘但解析失败（{type(exc).__name__}: {exc}）"
+    return {"ok": True, "text": f"《{title}》{len(text)} 字{state}。现在可以调 kemai.notes_build 生成复习笔记。"}

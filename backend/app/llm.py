@@ -51,6 +51,11 @@ def retryable(error: Exception) -> bool:
             return False
     status = getattr(error, "status_code", None)
     if status is not None:
+        # 403 通常是权限问题，不该重试；但很多第三方中转站前面挂 Cloudflare，
+        # 偶发把正常 POST 判成攻击返回 403，第二次请求就过了。重试 2 次的代价
+        # 很小，却不重试会让用户以为自己的 Key 坏了。订阅登录的 403 保持不重试。
+        if status == 403 and getattr(error, "auth_mode", None) != "oauth":
+            return True
         return status in RETRYABLE_STATUS or 500 <= status < 600
     if getattr(error, "timed_out", False):
         return True
@@ -150,7 +155,10 @@ def model_failure_message(error: Exception) -> str:
         if status == 403:
             if getattr(current, "auth_mode", None) == "oauth":
                 return "订阅账号无权使用此模型（HTTP 403），请确认订阅权限或改选账号可用的模型。"
-            return "模型服务拒绝访问（HTTP 403）。请检查当前 API Key 的模型使用权限。"
+            return ("模型服务返回 HTTP 403。两种可能：API Key 无权使用该模型；"
+                    "或中转网关的 Cloudflare 防护偶发拦截了请求（已自动重试）。"
+                    "建议先用「模型配置 → 测试连接」确认，若测试能通就稍后重试，"
+                    "仍不通再检查 Key 的模型权限。")
         if status == 404:
             return "模型或接口不存在（HTTP 404）。请在“模型配置”中检查模型名称、协议和接口根地址。"
         if status == 429:
