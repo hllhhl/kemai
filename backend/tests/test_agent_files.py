@@ -44,17 +44,22 @@ def test_writing_creates_a_backup(sandbox):
     assert backups and backups[0].read_text(encoding="utf-8") == "旧内容"
 
 
-def test_path_traversal_is_blocked(sandbox):
-    result = agent_files.fs_read({"path": "../../../../Windows/win.ini"})
-    assert result["ok"] is False
-    assert "不在可信目录" in result["text"]
+def test_path_traversal_is_resolved(sandbox):
+    """全盘开放后不再硬拒路径，但必须 resolve 展开，不能让注入生效。"""
+    project, _, _ = sandbox
+    result = agent_files.safe_path(str(project / ".." / "outside.txt"))
+    assert result[1] == ""
+    assert result[0].name == "outside.txt"
 
 
-def test_personal_directories_are_not_open_by_default(sandbox):
-    """桌面/下载/文档默认不开，要用户显式写进 agent-roots.json。"""
-    _, data, _ = sandbox
-    result = agent_files.fs_list({"path": str(data.parent / "Desktop")})
-    assert result["ok"] is False
+def test_personal_directories_are_reachable(sandbox):
+    """用户明确要求全盘可访问：桌面这类个人目录不再被白名单挡住。"""
+    project, _, _ = sandbox
+    desktop = project.parent / "Desktop"
+    desktop.mkdir()
+    result = agent_files.fs_list({"path": str(desktop)})
+    assert result["ok"] is True
+    assert "目录" in result["text"]
 
 
 def test_run_python_runs_in_the_workspace(sandbox):
@@ -78,13 +83,26 @@ def test_self_edit_changes_source_and_logs_it(sandbox):
     assert json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["action"] == "replace"
 
 
-def test_self_edit_refuses_files_outside_the_project(sandbox):
+def test_self_edit_allows_files_outside_the_project(sandbox):
+    """全盘开放后，改项目外的文件不再被硬拒（仍留备份与审计）。"""
     _, data, _ = sandbox
     outside = data / "outside.py"
     outside.write_text("X = 1\n", encoding="utf-8")
     result = agent_files.self_edit({"path": str(outside), "action": "append", "text": "# x"})
-    assert result["ok"] is False
-    assert "只能改课脉项目内" in result["text"]
+    assert result["ok"] is True
+    assert "# x" in outside.read_text(encoding="utf-8")
+
+
+def test_delete_moves_to_backup_instead_of_erasing(sandbox):
+    """删除一律移到备份区，不真删——个人文件安全的硬要求。"""
+    _, data, workspace = sandbox
+    target = workspace / "keep.txt"
+    target.write_text("重要", encoding="utf-8")
+    result = agent_files.fs_delete({"path": "keep.txt"})
+    assert result["ok"] is True
+    assert not target.exists()
+    backups = list((data / "agent-backups").rglob("keep.txt"))
+    assert backups and backups[0].read_text(encoding="utf-8") == "重要"
 
 
 def test_organize_is_dry_run_by_default(sandbox):

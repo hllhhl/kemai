@@ -54,8 +54,22 @@ def workspace_dir() -> Path:
 
 
 def roots() -> list[Path]:
-    """可信根目录。用户想放开别的目录，往 data/agent-roots.json 里加绝对路径。"""
-    result = [project_root().resolve(), data_dir().resolve(), workspace_dir().resolve()]
+    """全盘开放：这台机器上所有存在的盘符根，外加 Agent 自己的工作区。
+
+    用户明确要求「能访问修改电脑任何文件」。所以这里不再是白名单，
+    而是把本机所有盘符都列出来给 self_status 展示。真正的防护挪到了
+    写前备份 + 审计 + 哨兵逐次确认，而不是靠路径把 Agent 关在外面。
+    """
+    import string
+
+    result = [workspace_dir().resolve(), project_root().resolve(), data_dir().resolve()]
+    for letter in string.ascii_uppercase:
+        drive = Path(f"{letter}:\\")
+        try:
+            if drive.exists():
+                result.append(drive.resolve())
+        except OSError:
+            continue
     custom = data_dir() / "agent-roots.json"
     if custom.is_file():
         try:
@@ -66,7 +80,6 @@ def roots() -> list[Path]:
                     result.append(candidate)
         except (OSError, ValueError, TypeError):
             pass
-    # 去重，长路径排前面（后面的 startswith 判定才不会被父目录抢先）
     unique: list[Path] = []
     for root in result:
         if root not in unique:
@@ -74,8 +87,25 @@ def roots() -> list[Path]:
     return sorted(unique, key=lambda p: -len(str(p)))
 
 
+# 这些位置写错会让系统或软件起不来。不硬拦（用户要的是「任何文件」），
+# 但在每次写操作的结果里明确提醒，配合哨兵的确认一起用。
+PROTECTED_HINTS = ("\\windows", "\\system32", "\\program files", "\\programdata",
+                   "\\appdata", "pagefile.sys", "hiberfil.sys")
+
+
+def danger_note(path: Path) -> str:
+    lowered = str(path).lower()
+    hits = [hint for hint in PROTECTED_HINTS if hint in lowered]
+    return ("⚠️ 这个路径在系统/关键目录里（" + "、".join(hits) +
+            "），写错可能让系统或软件无法启动。" if hits else "")
+
+
 def safe_path(raw: str, *, must_exist: bool = False) -> tuple[Path | None, str]:
-    """把用户/模型给的路径收进可信根目录。返回 (路径, 错误说明)。"""
+    """解析任意绝对路径。不再限制可信根目录——用户已明确要求全盘可访问。
+
+    仍然做两件事：相对路径落到 agent-workspace；resolve() 展开符号链接和
+    .. ，避免路径注入。读写权限由哨兵确认和写前备份兜底。
+    """
     text = str(raw or "").strip()
     if not text:
         return None, "路径不能为空"
@@ -86,16 +116,9 @@ def safe_path(raw: str, *, must_exist: bool = False) -> tuple[Path | None, str]:
         resolved = candidate.expanduser().resolve()
     except (OSError, RuntimeError):
         return None, "路径无法解析"
-    for root in roots():
-        if resolved == root or root in resolved.parents:
-            if must_exist and not resolved.exists():
-                return None, f"路径不存在：{resolved}"
-            return resolved, ""
-    return None, (
-        f"路径不在可信目录内：{resolved}。"
-        f"当前开放的根目录：{', '.join(str(r) for r in roots())}。"
-        "要操作别的目录，把绝对路径写进 data/agent-roots.json 的 roots 列表。"
-    )
+    if must_exist and not resolved.exists():
+        return None, f"路径不存在：{resolved}"
+    return resolved, ""
 
 
 def _backup(path: Path) -> str:
@@ -142,7 +165,20 @@ def fs_read(args: dict) -> dict:
     if not path.is_file():
         return {"ok": False, "text": f"不是文件：{path}"}
     if path.suffix.lower() not in TEXT_SUFFIXES and path.suffix.lower() not in {".log", ".csv", ".toml"}:
-        return {"ok": False, "text": f"只能读文本类文件，收到 {path.suffix or '无扩展名'}"}
+        # 任意文件都能「访问」：二进制不硬拒，给出大小、类型和前若干字节，
+        # 真的要处理交给 run_python（那里可以读字节、转码、另存）。
+        import base64
+
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            return {"ok": False, "text": f"读取失败：{exc}"}
+        preview = base64.b64encode(raw[:64]).decode("ascii")
+        return {"ok": True, "text": (
+            f"二进制文件 {path}（{len(raw)} 字节，扩展名 {path.suffix or '无'}）。"
+            + chr(10) + f"前 64 字节 base64：{preview}"
+            + chr(10) + "要读全文或改写二进制，请用 kemai.run_python。"
+        )}
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
@@ -160,16 +196,27 @@ def fs_write(args: dict) -> dict:
     content = str(args.get("content") or "")
     if len(content) > MAX_WRITE:
         return {"ok": False, "text": f"内容超过 {MAX_WRITE} 字符，拆开写"}
-    if path.suffix.lower() not in TEXT_SUFFIXES:
-        return {"ok": False, "text": f"只能写文本类文件，收到 {path.suffix or '无扩展名'}"}
+    binary = str(args.get("encoding") or "").lower() == "base64"
+    if not binary and path.suffix.lower() not in TEXT_SUFFIXES:
+        return {"ok": False, "text": (
+            f"写文本文件时扩展名 {path.suffix or '无'} 不在允许列表里。"
+            "要写二进制/任意格式，传 encoding=base64 并把内容做 base64 编码。"
+        )}
     try:
         backup = _backup(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-    except OSError as exc:
+        if binary:
+            import base64
+
+            path.write_bytes(base64.b64decode(content))
+        else:
+            path.write_text(content, encoding="utf-8")
+    except (OSError, ValueError) as exc:
         return {"ok": False, "text": f"写入失败：{exc}"}
     note = f"已备份到 {backup}" if backup else "新建文件，无需备份"
-    return {"ok": True, "text": f"已写入 {path}（{len(content)} 字符）。{note}。"}
+    warning = danger_note(path)
+    return {"ok": True, "text": f"已写入 {path}（{len(content)} 字符）。{note}。"
+                               + (chr(10) + warning if warning else "")}
 
 
 def fs_organize(args: dict) -> dict:
@@ -217,8 +264,7 @@ def self_edit(args: dict) -> dict:
         path = candidate.resolve()
     except (OSError, RuntimeError):
         return {"ok": False, "text": "路径无法解析"}
-    if root not in path.parents and path != root:
-        return {"ok": False, "text": f"self_edit 只能改课脉项目内的文件（根目录 {root}）"}
+    outside_project = root not in path.parents and path != root
     if path.suffix.lower() not in EDITABLE_SUFFIXES:
         return {"ok": False, "text": f"self_edit 只改源码/配置文本，收到 {path.suffix}"}
     if not path.is_file():
@@ -256,10 +302,14 @@ def self_edit(args: dict) -> dict:
     with log.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + chr(10))
     suffix = (".py" if path.suffix == ".py" else "")
+    extra = danger_note(path)
+    if outside_project:
+        extra += chr(10) + "这个路径在课脉项目之外，改动不属于软件自身。"
     return {"ok": True, "text": (
         f"已改 {path}（{len(original)} → {len(updated)} 字符）。备份：{backup}。"
         + (" 这是 Python 后端源码，要**重启课脉**才生效；" if suffix else " 前端源码要重新构建才生效；")
         + " 改动已记到 data/self-edits.jsonl。"
+        + (chr(10) + extra if extra.strip() else "")
     )}
 
 
@@ -299,8 +349,109 @@ def run_python(args: dict) -> dict:
 def self_status(args: dict) -> dict:
     """Agent 查自己能碰哪些地方、能改什么。"""
     return {"ok": True, "text": (
-        "Agent 当前的可信根目录：" + chr(10) + _roots_text() + chr(10) + chr(10)
-        + "可改的源码类型：" + "、".join(sorted(EDITABLE_SUFFIXES)) + chr(10)
+        "Agent 可以访问这台电脑上的任意绝对路径（全盘开放）：" + chr(10) + _roots_text() + chr(10) + chr(10)
+        + "可改的文本类型：" + "、".join(sorted(EDITABLE_SUFFIXES)) + chr(10)
+        + "二进制文件可读前 64 字节；写二进制用 fs_write 的 encoding=base64。" + chr(10)
         + "写操作都会先备份到 data/agent-backups/，并记到 data/self-edits.jsonl。" + chr(10)
+        + "删除一律移到备份区，不会真删。" + chr(10)
         + "所有写工具在 catalog 里标 read_only=False，执行前会弹确认。"
+        + "系统/关键目录的写操作会额外给出警告。"
     )}
+
+def fs_info(args: dict) -> dict:
+    """看任意文件/目录的大小、修改时间、类型。"""
+    path, error = safe_path(args.get("path") or "", must_exist=True)
+    if error:
+        return {"ok": False, "text": error}
+    stat = path.stat()
+    kind = "目录" if path.is_dir() else "文件"
+    lines = [
+        f"路径：{path}",
+        f"类型：{kind}",
+        f"大小：{stat.st_size} 字节",
+        f"修改时间：{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(stat.st_mtime))}",
+        f"后缀：{path.suffix or '无'}",
+    ]
+    if path.is_dir():
+        try:
+            items = list(path.iterdir())
+            lines.append(f"子项：{len(items)} 个")
+        except OSError:
+            pass
+    return {"ok": True, "text": chr(10).join(lines)}
+
+
+def fs_mkdir(args: dict) -> dict:
+    path, error = safe_path(args.get("path") or "")
+    if error:
+        return {"ok": False, "text": error}
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return {"ok": False, "text": f"创建目录失败：{exc}"}
+    return {"ok": True, "text": f"目录已就绪：{path}"}
+
+
+def fs_copy(args: dict) -> dict:
+    src, error = safe_path(args.get("src") or "", must_exist=True)
+    if error:
+        return {"ok": False, "text": error}
+    dst, error = safe_path(args.get("dst") or "")
+    if error:
+        return {"ok": False, "text": error}
+    if not src.is_file():
+        return {"ok": False, "text": f"只能复制文件，收到：{src}"}
+    if dst.exists() and not bool(args.get("overwrite")):
+        return {"ok": False, "text": f"目标已存在：{dst}。要覆盖请传 overwrite=true（会先备份）"}
+    try:
+        if dst.exists():
+            _backup(dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+    except OSError as exc:
+        return {"ok": False, "text": f"复制失败：{exc}"}
+    return {"ok": True, "text": f"已复制 {src} → {dst}"}
+
+
+def fs_move(args: dict) -> dict:
+    """移动或重命名。原件留一份备份，不做真删除。"""
+    src, error = safe_path(args.get("src") or "", must_exist=True)
+    if error:
+        return {"ok": False, "text": error}
+    dst, error = safe_path(args.get("dst") or "")
+    if error:
+        return {"ok": False, "text": error}
+    if dst.exists():
+        return {"ok": False, "text": f"目标已存在：{dst}，先换个名字"}
+    try:
+        _backup(src)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+    except OSError as exc:
+        return {"ok": False, "text": f"移动失败：{exc}"}
+    return {"ok": True, "text": f"已移动 {src} → {dst}（原件已备份）"}
+
+
+def fs_delete(args: dict) -> dict:
+    """删除一律移到备份区，不真删——这是个人文件安全的硬要求。"""
+    src, error = safe_path(args.get("path") or "", must_exist=True)
+    if error:
+        return {"ok": False, "text": error}
+    backup = _backup(src) if src.is_file() else ""
+    if not backup:
+        # 目录也移到备份区，而不是 rmtree
+        stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1000) % 1000}"
+        folder = data_dir() / "agent-backups" / stamp
+        folder.mkdir(parents=True, exist_ok=True)
+        backup = str(folder / src.name)
+        try:
+            shutil.move(str(src), backup)
+        except OSError as exc:
+            return {"ok": False, "text": f"移到备份区失败：{exc}"}
+    else:
+        try:
+            src.unlink()
+        except OSError as exc:
+            return {"ok": False, "text": f"删除失败（备份仍在 {backup}）：{exc}"}
+    return {"ok": True, "text": f"已从原位置移除，原件在备份区：{backup}。没有真删。"}
+

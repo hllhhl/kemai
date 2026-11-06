@@ -44,6 +44,43 @@ def catalog() -> list[dict]:
     """给模型看的工具清单，格式和 MCP 工具一致，agent 循环不用特判。"""
     return [
         {
+            "name": "kemai.fs_info",
+            "description": "查看电脑上任意文件/目录的大小、类型、修改时间。",
+            "read_only": True,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        },
+        {
+            "name": "kemai.fs_mkdir",
+            "description": "在任意位置创建目录。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        },
+        {
+            "name": "kemai.fs_copy",
+            "description": "复制任意文件到任意位置。目标已存在时需 overwrite=true，且会先备份。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {
+                "src": {"type": "string"}, "dst": {"type": "string"},
+                "overwrite": {"type": "boolean"}}, "required": ["src", "dst"]},
+        },
+        {
+            "name": "kemai.fs_move",
+            "description": "移动或重命名任意文件/目录。原件自动备份，不做真删除。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {"src": {"type": "string"}, "dst": {"type": "string"}}, "required": ["src", "dst"]},
+        },
+        {
+            "name": "kemai.fs_delete",
+            "description": "从原位置移除任意文件/目录。一律移到 data/agent-backups 备份区，不会真删；执行前需要用户确认。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+        },
+        {
             "name": "kemai.self_status",
             "description": "查 Agent 自己能操作哪些目录、能改哪些源码类型、备份和审批规则。想动文件前先调它。",
             "read_only": True,
@@ -296,6 +333,11 @@ def _require():
 def call(name: str, args: dict, course_id: str) -> dict:
     """执行一个课程工具。返回 {ok, text}，和 MCP 的返回形状保持一致。"""
     handler = {
+        "kemai.fs_info": lambda args, _cid: _agent_files.fs_info(args),
+        "kemai.fs_mkdir": lambda args, _cid: _agent_files.fs_mkdir(args),
+        "kemai.fs_copy": lambda args, _cid: _agent_files.fs_copy(args),
+        "kemai.fs_move": lambda args, _cid: _agent_files.fs_move(args),
+        "kemai.fs_delete": lambda args, _cid: _agent_files.fs_delete(args),
         "kemai.self_status": lambda args, _cid: _agent_files.self_status(args),
         "kemai.fs_list": lambda args, _cid: _agent_files.fs_list(args),
         "kemai.fs_read": lambda args, _cid: _agent_files.fs_read(args),
@@ -327,7 +369,8 @@ def call(name: str, args: dict, course_id: str) -> dict:
                    "kemai.bili_parts", "kemai.bili_transcript",
                    "kemai.self_status", "kemai.fs_list", "kemai.fs_read",
                    "kemai.fs_write", "kemai.fs_organize", "kemai.self_edit",
-                   "kemai.run_python"}
+                   "kemai.run_python", "kemai.fs_info", "kemai.fs_mkdir",
+                   "kemai.fs_copy", "kemai.fs_move", "kemai.fs_delete"}
     if not course_id and name not in COURSE_FREE:
         return {"ok": False, "text": "当前没有选中的课程，先让用户在左边选一门课"}
     try:
