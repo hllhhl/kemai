@@ -23,6 +23,8 @@ from typing import Any
 
 from sqlalchemy import func, select
 
+from . import agent_files as _agent_files
+
 from .models import (
     Chapter,
     Course,
@@ -41,6 +43,62 @@ MAX_NOTE_CHARS = 6000
 def catalog() -> list[dict]:
     """给模型看的工具清单，格式和 MCP 工具一致，agent 循环不用特判。"""
     return [
+        {
+            "name": "kemai.self_status",
+            "description": "查 Agent 自己能操作哪些目录、能改哪些源码类型、备份和审批规则。想动文件前先调它。",
+            "read_only": True,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "kemai.fs_list",
+            "description": "列一个目录下的文件和子目录（限可信根目录）。",
+            "read_only": True,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {"path": {"type": "string", "description": "目录路径，相对路径以 agent-workspace 为基准"}}, "required": ["path"]},
+        },
+        {
+            "name": "kemai.fs_read",
+            "description": "读文本文件（源码、配置、笔记、日志）。可用 offset/limit 分段读。",
+            "read_only": True,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {"path": {"type": "string"}, "offset": {"type": "integer"}, "limit": {"type": "integer"}}, "required": ["path"]},
+        },
+        {
+            "name": "kemai.fs_write",
+            "description": "写文本文件（新建或覆盖）。写前自动备份；执行前需要用户确认。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
+        },
+        {
+            "name": "kemai.fs_organize",
+            "description": "按扩展名把目录里的文件归到子文件夹。默认 dry_run=true 只预演，设 false 才真的移动；只移动不删除。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {"path": {"type": "string"}, "dry_run": {"type": "boolean"}}, "required": ["path"]},
+        },
+        {
+            "name": "kemai.self_edit",
+            "description": "修改课脉自己的源码/配置（replace / append / write）。这是 Agent 改软件本身的入口；自动备份并留审计；Python 后端要重启、前端要重建才生效。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {
+                "path": {"type": "string", "description": "项目内源码路径"},
+                "action": {"type": "string", "description": "replace / append / write"},
+                "old": {"type": "string"}, "new": {"type": "string"},
+                "text": {"type": "string"}, "content": {"type": "string"},
+                "count": {"type": "integer"}}, "required": ["path", "action"]},
+        },
+        {
+            "name": "kemai.run_python",
+            "description": "在可信工作区执行一段 Python 代码，用来整理文件、算数据、生成内容——能自己写代码，不必只挑现成工具。限时 60 秒，执行前需要用户确认。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {
+                "code": {"type": "string"}, "cwd": {"type": "string"},
+                "timeout": {"type": "integer"}}, "required": ["code"]},
+        },
         {
             "name": "kemai.bili_status",
             "description": "查 B 站登录态。AI 字幕和搜索都需要登录；没登录时会说明该去扫码。",
@@ -238,6 +296,13 @@ def _require():
 def call(name: str, args: dict, course_id: str) -> dict:
     """执行一个课程工具。返回 {ok, text}，和 MCP 的返回形状保持一致。"""
     handler = {
+        "kemai.self_status": lambda args, _cid: _agent_files.self_status(args),
+        "kemai.fs_list": lambda args, _cid: _agent_files.fs_list(args),
+        "kemai.fs_read": lambda args, _cid: _agent_files.fs_read(args),
+        "kemai.fs_write": lambda args, _cid: _agent_files.fs_write(args),
+        "kemai.fs_organize": lambda args, _cid: _agent_files.fs_organize(args),
+        "kemai.self_edit": lambda args, _cid: _agent_files.self_edit(args),
+        "kemai.run_python": lambda args, _cid: _agent_files.run_python(args),
         "kemai.bili_status": _bili_status,
         "kemai.bili_search": _bili_search,
         "kemai.bili_parts": _bili_parts,
@@ -259,7 +324,10 @@ def call(name: str, args: dict, course_id: str) -> dict:
     # B 站找课是「从零建一门课」的起点，这时候本来就没有课程可选。
     # 这几个工具不碰课程数据，不该被「先选课」挡住。
     COURSE_FREE = {"kemai.bili_status", "kemai.bili_search",
-                   "kemai.bili_parts", "kemai.bili_transcript"}
+                   "kemai.bili_parts", "kemai.bili_transcript",
+                   "kemai.self_status", "kemai.fs_list", "kemai.fs_read",
+                   "kemai.fs_write", "kemai.fs_organize", "kemai.self_edit",
+                   "kemai.run_python"}
     if not course_id and name not in COURSE_FREE:
         return {"ok": False, "text": "当前没有选中的课程，先让用户在左边选一门课"}
     try:
