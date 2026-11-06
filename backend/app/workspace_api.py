@@ -82,7 +82,7 @@ class ImageInput(BaseModel):
 class AgentStartInput(BaseModel):
     goal: str = Field(min_length=1, max_length=4000)
     course_id: str = ""
-    max_turns: int = Field(default=6, ge=1, le=12)
+    max_turns: int = Field(default=80, ge=1, le=300)
     # 同一个 conversation_id 的多次运行共享上下文；空串表示每次全新
     conversation_id: str = ""
     images: list[ImageInput] = Field(default_factory=list, max_length=4)

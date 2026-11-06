@@ -34,7 +34,7 @@ from .sentinel import ALLOW, ASK, DENY, sentinel
 
 logger = logging.getLogger(__name__)
 
-MAX_TURNS = 6
+MAX_TURNS = 80
 MAX_OBSERVATION = 4000      # 单个工具输出喂回模型的上限（字符）
 MAX_HISTORY = 12            # 兼容旧引用（fit_context 后不再按条数删）
 CONTEXT_BUDGET = 14000      # 消息总字符预算；超了按 fit_context 分级压缩
@@ -98,6 +98,7 @@ class AgentRun:
         self.last_signature = ""
         # 本次运行的模型消耗（final 事件带给界面）
         self.usage: dict | None = None
+        self.parse_failures = 0
         self.turn = 0
         self.created_at = time.time()
 
@@ -538,8 +539,20 @@ def _turn(run: AgentRun, llm) -> str:
         raw = llm.complete(run.messages, json_mode=True)
         decision = parse_json(raw)
     except Exception as exc:  # noqa: BLE001
+        # 网关偶发把 JSON 截断，或模型多说了一句话。以前直接判整轮失败，
+        # 用户看到的是红色错误；其实再给一次机会基本就能恢复。
+        run.parse_failures += 1
+        if run.parse_failures <= 3:
+            _observe(run, "协议",
+                     f"上一步输出不是完整 JSON（{type(exc).__name__}: {exc}）。"
+                     "请只输出一个 JSON 对象，不要解释、不要 Markdown 代码块，"
+                     'action 只能是 skill_list / skill_use / tool / final。')
+            run.steps.append({"turn": run.turn, "kind": "retry-protocol",
+                              "detail": f"JSON 解析失败，第 {run.parse_failures} 次重试"})
+            return "continue"
         run.status = "failed"
-        run.answer = f"模型这一步没给出可用结果：{type(exc).__name__}: {exc}"
+        run.answer = (f"连续 {run.parse_failures} 次没拿到可用的 JSON 动作："
+                      f"{type(exc).__name__}: {exc}。可以再试一次，或换一个模型。")
         return "failed"
 
     action = str(decision.get("action") or "").strip()
@@ -660,7 +673,7 @@ def _close_out(run: AgentRun) -> None:
     """轮数用完还没结论时，给一句诚实的话，别装作完成了。"""
     if run.status == "running":
         run.status = "done"
-        run.answer = run.answer or f"已经走了 {run.max_turns} 步还没得出结论。要接着做，把问题问得更具体一点。"
+        run.answer = run.answer or (f"已经走了 {run.max_turns} 步还没收尾。可以让我继续，或把任务拆小一点。")
 
 
 def advance(run: AgentRun, llm) -> dict:

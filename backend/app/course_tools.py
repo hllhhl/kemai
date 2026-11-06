@@ -44,6 +44,16 @@ def catalog() -> list[dict]:
     """给模型看的工具清单，格式和 MCP 工具一致，agent 循环不用特判。"""
     return [
         {
+            "name": "kemai.bili_import_course",
+            "description": "把 B 站一门课的前 N 讲字幕一次性批量导入当前课程并解析入库。逐讲循环在服务端跑完，不占 Agent 轮数；导完接着调 kemai.notes_build 生成逐章复习笔记。用户要「一步到位」时用这个。",
+            "read_only": False,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {
+                "bvid": {"type": "string", "description": "BV 号，先用 bili_search 拿到"},
+                "limit": {"type": "integer", "description": "导入前几讲，默认 3，最多 28"},
+                "course_name": {"type": "string"}}, "required": ["bvid"]},
+        },
+        {
             "name": "kemai.fs_info",
             "description": "查看电脑上任意文件/目录的大小、类型、修改时间。",
             "read_only": True,
@@ -333,6 +343,7 @@ def _require():
 def call(name: str, args: dict, course_id: str) -> dict:
     """执行一个课程工具。返回 {ok, text}，和 MCP 的返回形状保持一致。"""
     handler = {
+        "kemai.bili_import_course": _bili_import_course,
         "kemai.fs_info": lambda args, _cid: _agent_files.fs_info(args),
         "kemai.fs_mkdir": lambda args, _cid: _agent_files.fs_mkdir(args),
         "kemai.fs_copy": lambda args, _cid: _agent_files.fs_copy(args),
@@ -757,15 +768,11 @@ def _bili_transcript(args: dict, _course_id: str) -> dict:
                                "之后调 kemai.notes_build 生成逐章复习笔记。"}
 
 
-def _course_import_text(args: dict, course_id: str) -> dict:
-    """把字幕/讲义正文写成资料，之后 notes_build 才有依据。"""
+def _import_text_to_course(course_id: str, title: str, text: str) -> str:
+    """把一段正文落成资料并解析入库。批量导入和单条导入共用这一条路。"""
     from .models import Document, new_id
 
     services = _require()
-    text = str(args.get("text") or "").strip()
-    title = str(args.get("title") or "导入资料").strip()[:80]
-    if len(text) < 20:
-        return {"ok": False, "text": "正文太短（少于 20 字），不入库"}
     document_id = new_id()
     path = services.upload_dir / f"{document_id}.md"
     path.write_text("# " + title + NL + NL + text, encoding="utf-8")
@@ -777,7 +784,76 @@ def _course_import_text(args: dict, course_id: str) -> dict:
         db.commit()
     try:
         services.ingest_document(document_id)
-        state = "已解析并入库"
+        return "已解析并入库"
     except Exception as exc:  # noqa: BLE001 - 解析失败也要告诉模型资料已经落盘
-        state = f"已落盘但解析失败（{type(exc).__name__}: {exc}）"
+        return f"已落盘但解析失败（{type(exc).__name__}: {exc}）"
+
+
+def _course_import_text(args: dict, course_id: str) -> dict:
+    """把字幕/讲义正文写成资料，之后 notes_build 才有依据。"""
+    text = str(args.get("text") or "").strip()
+    title = str(args.get("title") or "导入资料").strip()[:80]
+    if len(text) < 20:
+        return {"ok": False, "text": "正文太短（少于 20 字），不入库"}
+    state = _import_text_to_course(course_id, title, text)
     return {"ok": True, "text": f"《{title}》{len(text)} 字{state}。现在可以调 kemai.notes_build 生成复习笔记。"}
+
+def _bili_import_course(args: dict, course_id: str) -> dict:
+    """把 B 站一门课的前 N 讲字幕批量导入当前课程。
+
+    逐讲取字幕是 IO 循环，不该让模型一轮一轮地调工具占轮数。服务端一次跑完，
+    模型只负责决定「导几讲」。这是用户说的「一步到位」的关键一步。
+    """
+    from .bilibili import BilibiliError
+
+    if not course_id:
+        return {"ok": False, "text": "先在左边选一门课，字幕要导进这门课里"}
+    bvid = str(args.get("bvid") or "").strip()
+    if not bvid:
+        return {"ok": False, "text": "bvid 不能为空（先用 kemai.bili_search 找课）"}
+    limit = max(1, min(int(args.get("limit") or 3), 28))
+    title_prefix = str(args.get("course_name") or "").strip()[:40]
+
+    def field(item, name, default=""):
+        return item.get(name, default) if isinstance(item, dict) else getattr(item, name, default)
+
+    imported, skipped, total = [], [], 0
+    try:
+        with _bili_client() as client:
+            video = client.view(bvid)
+            pages = list(getattr(video, "pages", ()) or ())[:limit]
+            for index, page in enumerate(pages, start=1):
+                cid = int(field(page, "cid", 0) or 0)
+                part_title = str(field(page, "part", "") or f"第 {index} 讲").strip()[:60]
+                if not cid:
+                    skipped.append(f"第 {index} 讲没有 cid")
+                    continue
+                result = client.transcript(bvid, cid)
+                lines = result.get("lines") or []
+                if not lines:
+                    skipped.append(f"第 {index} 讲没有字幕（{part_title}）")
+                    continue
+                rows = []
+                for item in lines:
+                    seconds = int(item.get("from", 0) or 0)
+                    stamp = f"{seconds // 60:02d}:{seconds % 60:02d}"
+                    rows.append(f"[{stamp}] {item.get('text', '')}")
+                text = NL.join(rows)
+                name = f"{title_prefix + ' ' if title_prefix else ''}第{index}讲 {part_title}"[:80]
+                state = _import_text_to_course(course_id, name, text)
+                imported.append(f"第 {index} 讲《{part_title}》{len(text)} 字 — {state}")
+                total += len(text)
+    except BilibiliError as exc:
+        return {"ok": False, "text": f"批量导入失败：{exc}"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "text": f"批量导入异常：{type(exc).__name__}: {exc}"}
+
+    if not imported:
+        return {"ok": False, "text": "一讲都没导进来：" + "；".join(skipped[:5])}
+    text = (f"已把 BV {bvid} 的前 {len(imported)} 讲字幕导入课程，共 {total} 字："
+            + NL + NL.join(imported[:10]))
+    if skipped:
+        text += NL + "跳过：" + "；".join(skipped[:5])
+    text += NL + NL + "现在调 kemai.notes_build 生成逐章复习笔记。"
+    return {"ok": True, "text": text}
+

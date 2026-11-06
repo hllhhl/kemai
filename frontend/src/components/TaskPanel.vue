@@ -521,7 +521,7 @@ async function send(text?: string, opts: { reuseUser?: boolean; versions?: strin
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        goal, course_id: props.courseId || '', max_turns: 6,
+        goal, course_id: props.courseId || '', max_turns: 80,
         conversation_id: conversationId.value, images,
       }),
       signal: controller.signal,
