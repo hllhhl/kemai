@@ -142,9 +142,24 @@ def _roots_text() -> str:
 
 
 def fs_list(args: dict) -> dict:
-    path, error = safe_path(args.get("path") or ".", must_exist=True)
+    raw = str(args.get("path") or ".")
+    path, error = safe_path(raw, must_exist=True)
     if error:
-        return {"ok": False, "text": error}
+        # 只说"不存在"会让模型把同一个错路径试几十次。把父目录里
+        # 真正存在的目录名一起给出去，一次就能纠正常见的单复数笔误。
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = workspace_dir() / candidate
+        parent = candidate.expanduser().resolve().parent
+        hints = []
+        try:
+            if parent.is_dir():
+                hints = [str(item) for item in sorted(parent.iterdir()) if item.is_dir()][:20]
+        except OSError:
+            pass
+        suffix = (chr(10) + "该位置下实际存在的目录：" + chr(10)
+                  + chr(10).join("- " + item for item in hints)) if hints else ""
+        return {"ok": False, "text": error + suffix}
     if not path.is_dir():
         return {"ok": False, "text": f"不是目录：{path}"}
     try:

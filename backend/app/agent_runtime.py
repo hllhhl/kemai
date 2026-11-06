@@ -643,7 +643,7 @@ def _turn(run: AgentRun, llm) -> str:
             audit.record(tool=tool_name, args=args, decision="allow", ok=False, run_id=run.id,
                          conversation_id=run.conversation_id, course_id=run.course_id,
                          error="循环守卫：重复调用已拦下，改用已有结果收尾")
-            if run.halt_streak >= 2:
+            if run.halt_streak >= 2 or run.tool_totals.get(tool_name, 0) >= TOOL_HALT + 2:
                 run.status = "done"
                 if not run.answer:
                     done_steps = [step.get("tool") for step in run.steps if step.get("tool")]
