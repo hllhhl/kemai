@@ -55,6 +55,7 @@ SYSTEM = """你是一个会用工具的课程助手。每一步只输出一个 J
 规则：
 - 先想清楚缺什么信息，再决定调哪个工具；能直接回答就别调。
 - **不要问用户"要不要我查一下"**：能查就直接查，查完再说结论。只有真的缺关键信息（比如没说清是哪一章）才问。
+- 如果 course_brief 提示"当前没有选中的课程"，或者用户说还没建课，**只调一次 kemai.course_create 建课**（name 用用户说的课程名），然后立刻继续下一步，不要重复调用，也不要回来问用户。
 - 数量、字数、条数这类信息一律引用工具返回的数字，不确定就说"没查到"，不要估算。
 - **长期记忆已经附在本提示词末尾**（我是谁 / 怎么做 / 关于用户 / 跨课程 / 这门课）。
   回答"我习惯怎样""我是谁"这类问题时直接引用它，不要为此调用 memory_read；
@@ -631,12 +632,16 @@ def _turn(run: AgentRun, llm) -> str:
         # 失败计数管不到"成功了但没进展"。查两遍同一份课程简介，第二次纯属浪费一轮模型调用。
         guard = note_call(run, tool_name, signature)
         if guard == "halt":
-            _observe(run, tool_name,
-                     "这个调用已经重复多次，停手。用已经拿到的信息直接回答用户，不要再调工具。")
+            # 以前只是"提醒"模型停手，它常常不听，一路空转到轮数上限。
+            # 重复到这个程度说明它已经卡死，强制收尾并如实说明，别再烧额度。
             audit.record(tool=tool_name, args=args, decision="allow", ok=False, run_id=run.id,
                          conversation_id=run.conversation_id, course_id=run.course_id,
-                         error="循环守卫：重复调用已拦下")
-            return "continue"
+                         error="循环守卫：重复调用已强制收尾")
+            run.status = "done"
+            run.answer = (f"这一步卡住了：{tool_name} 被反复调用，没有新进展，我已停止循环。"
+                          "目前拿到的信息不足以完成任务；常见原因是 B 站搜索被反爬拦截、"
+                          "或画面截图需要浏览器插件手动同步。请稍后重试，或先把资料/截图给我。")
+            return "done"
         if guard == "warn":
             # 只提示不拦：第二次常常是换了说法的重试，拦掉可能丢掉本来拿得到的结果
             _observe(run, tool_name,

@@ -370,6 +370,29 @@ def register_workspace_routes(app, services) -> None:
             raise HTTPException(502, f"生成计划失败：{type(exc).__name__}: {exc}") from exc
         return {"plan": plan, "days": payload.days}
 
+    @app.post("/edu/frames")
+    def edu_frames_receive(payload: dict):
+        """接收浏览器扩展截好的画面：存图、自动建课、生成带图笔记。
+
+        和 /finder/ocr-frames 的区别：那个只把画面 OCR 成文字，
+        这里保留图片本身，并把它插进笔记里。
+        """
+        from . import edu_frames
+
+        try:
+            return edu_frames.import_frames(services, payload)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("接收画面失败")
+            raise HTTPException(500, f"{type(exc).__name__}: {exc}") from exc
+
+    @app.get("/edu/frames/recent")
+    def edu_frames_recent(limit: int = 5):
+        from . import edu_frames
+
+        return {"items": edu_frames.recent_receipts(min(max(limit, 1), 20))}
+
     # ── Agent：模型自己选工具、自己调 ─────────────────────
     @app.post("/agent/run")
     def agent_run(payload: AgentStartInput):

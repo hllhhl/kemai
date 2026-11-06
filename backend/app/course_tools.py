@@ -44,6 +44,20 @@ def catalog() -> list[dict]:
     """给模型看的工具清单，格式和 MCP 工具一致，agent 循环不用特判。"""
     return [
         {
+            "name": "kemai.course_create",
+            "description": "从零建立一门课程。用户说「还没有课程」「帮我建一门课」时用；返回课程 id，后续工具会自动挂到这门课。没有选中课程时第一步就调它。",
+            "read_only": True,  # 只新增、不覆盖任何已有内容，风险等同读操作
+            "destructive": False,
+            "schema": {"type": "object", "properties": {"name": {"type": "string", "description": "课程名"}}, "required": ["name"]},
+        },
+        {
+            "name": "kemai.frames_recent",
+            "description": "查浏览器插件最近同步过来的视频画面截图（课程、张数、图片目录、带图笔记路径）。",
+            "read_only": True,
+            "destructive": False,
+            "schema": {"type": "object", "properties": {"limit": {"type": "integer"}}},
+        },
+        {
             "name": "kemai.bili_import_course",
             "description": "把 B 站一门课的前 N 讲字幕一次性批量导入当前课程并解析入库。逐讲循环在服务端跑完，不占 Agent 轮数；导完接着调 kemai.notes_build 生成逐章复习笔记。用户要「一步到位」时用这个。",
             "read_only": False,
@@ -343,6 +357,8 @@ def _require():
 def call(name: str, args: dict, course_id: str) -> dict:
     """执行一个课程工具。返回 {ok, text}，和 MCP 的返回形状保持一致。"""
     handler = {
+        "kemai.course_create": _course_create,
+        "kemai.frames_recent": _frames_recent,
         "kemai.bili_import_course": _bili_import_course,
         "kemai.fs_info": lambda args, _cid: _agent_files.fs_info(args),
         "kemai.fs_mkdir": lambda args, _cid: _agent_files.fs_mkdir(args),
@@ -376,7 +392,11 @@ def call(name: str, args: dict, course_id: str) -> dict:
         return {"ok": False, "text": f"没有这个课程工具：{name}"}
     # B 站找课是「从零建一门课」的起点，这时候本来就没有课程可选。
     # 这几个工具不碰课程数据，不该被「先选课」挡住。
-    COURSE_FREE = {"kemai.bili_status", "kemai.bili_search",
+    global _created_course
+    if not course_id and _created_course:
+        course_id = _created_course
+    COURSE_FREE = {"kemai.course_create", "kemai.frames_recent",
+                   "kemai.bili_status", "kemai.bili_search",
                    "kemai.bili_parts", "kemai.bili_transcript",
                    "kemai.self_status", "kemai.fs_list", "kemai.fs_read",
                    "kemai.fs_write", "kemai.fs_organize", "kemai.self_edit",
@@ -885,4 +905,36 @@ def _bili_import_course(args: dict, course_id: str) -> dict:
                   if not confirm_error else f"章节自动确认失败：{confirm_error}")
     text += NL + NL + "现在调 kemai.notes_build 生成逐章复习笔记。"
     return {"ok": True, "text": text}
+
+_created_course = ""
+
+
+def _course_create(args: dict, _course_id: str) -> dict:
+    """从零建课，并让本轮后续工具自动挂到它上面。"""
+    global _created_course
+
+    from .edu_frames import ensure_course
+
+    name = str(args.get("name") or "").strip()[:80] or "新课程"
+    services = _require()
+    course_id, created = ensure_course(services, name)
+    _created_course = course_id
+    return {"ok": True, "text": (
+        f"课程「{name}」{'已新建' if created else '已存在'}，id={course_id}。"
+        + NL + "本轮后续工具会自动挂到这门课；界面左侧刷新后能看到它。"
+    )}
+
+
+def _frames_recent(args: dict, _course_id: str) -> dict:
+    from .edu_frames import recent_receipts
+
+    rows = recent_receipts(int(args.get("limit") or 5))
+    if not rows:
+        return {"ok": True, "text": "还没收到浏览器插件同步过来的画面。请在 B 站视频页打开笔记面板，截帧后点「同步到课脉」。"}
+    lines = []
+    for row in rows:
+        lines.append(f"- {row.get('at')} | 课程 {row.get('course_name') or row.get('course_id')}"
+                     f" | {row.get('frames')} 张 | 带图笔记 {row.get('note')}"
+                     f" | 资料状态 {row.get('state')}")
+    return {"ok": True, "text": "最近同步的画面：" + NL + NL.join(lines)}
 
