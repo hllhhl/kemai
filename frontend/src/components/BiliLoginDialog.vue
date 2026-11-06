@@ -2,7 +2,7 @@
 import { onUnmounted, ref, watch } from 'vue'
 import { api } from '../api'
 
-type LoginStatus = { loggedIn: boolean; uname: string; mid: number; savedAt: number }
+type LoginStatus = { loggedIn: boolean; uname: string; mid: number; savedAt: number; encrypted?: boolean; credentialRisk?: boolean }
 type QrPayload = { key: string; url: string; image: string }
 type Phase = 'idle' | 'loading' | 'waiting' | 'scanned' | 'expired' | 'ok' | 'error'
 
@@ -112,6 +112,11 @@ onUnmounted(stopPolling)
         <button class="icon-button small" aria-label="关闭" @click="close">×</button>
       </header>
 
+      <div class="bili-risk" role="alert">
+        <strong>⚠️ 这把凭证能开整个 B 站账号</strong>
+        <span>登录后保存的 SESSDATA 不只是「看字幕」：它能发评论、改资料、看私信。请只在你自己的电脑上登录，不要复制或共享 <code>bili-session.json</code>。软件用 Windows DPAPI 按当前账户加密存储，不上传、不写进日志。</span>
+      </div>
+
       <div v-if="status?.loggedIn" class="bili-logged">
         <p class="bili-ok">
           已登录<span v-if="status.uname">：{{ status.uname }}</span>
@@ -173,4 +178,10 @@ onUnmounted(stopPolling)
 .bili-mid { margin-left: 8px; font-size: 12px; color: var(--muted, var(--muted)); }
 .bili-note { margin: 0; font-size: 11.5px; color: var(--muted, var(--muted)); line-height: 1.6; }
 @media (max-width: 620px) { .bili-body { grid-template-columns: 1fr; } .bili-qr { margin: 0 auto; } }
+</style>
+
+<style scoped>
+.bili-risk { display: flex; flex-direction: column; gap: 4px; margin: 0 0 14px; padding: 10px 12px; border: 1px solid #e0a458; border-left: 3px solid #d98014; border-radius: 8px; background: #fff8ec; color: #7a4a08; font-size: 12px; line-height: 1.6; }
+.bili-risk strong { font-size: 12.5px; }
+.bili-risk code { font-size: 11px; padding: 1px 4px; border-radius: 4px; background: #f5e7cf; }
 </style>

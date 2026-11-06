@@ -85,7 +85,9 @@ def test_poll_success_saves_cookie_and_profile(tmp_path):
     saved = tmp_path / "bili-session.json"
     assert saved.exists()
     payload = json.loads(saved.read_text(encoding="utf-8"))
-    assert "SESSDATA=secretvalue" in payload["cookie"]
+    # 凭证现在以 DPAPI 密文落盘，明文不能出现在文件里
+    assert "SESSDATA=secretvalue" not in saved.read_text(encoding="utf-8")
+    assert payload.get("cookieEnc")
     assert payload["uname"] == "张三"
 
     status = auth.status()
@@ -103,7 +105,9 @@ def test_clear_removes_cookie(tmp_path):
 
 def test_status_without_file(tmp_path):
     status = BiliAuth(tmp_path).status()
-    assert status == {"loggedIn": False, "uname": "", "mid": 0, "savedAt": 0}
+    assert status["loggedIn"] is False
+    assert status["uname"] == "" and status["mid"] == 0 and status["savedAt"] == 0
+    assert status["encrypted"] is False and status["credentialRisk"] is False
 
 
 def test_bilibili_client_sends_cookie_when_present(tmp_path):
