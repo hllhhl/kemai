@@ -129,21 +129,17 @@ def test_max_turns_caps_the_loop(fake_tools):
     assert len(fake_tools) == 3
 
 
-def test_repeating_the_exact_same_call_is_halted(fake_tools):
-    """同一份结果查两遍没意义，第三次必须拦下，否则白烧一轮模型。
-
-    这里和 test_max_turns_caps_the_loop 是两条独立的刹车：那条测轮数，
-    这条测循环守卫。
-    """
+def test_repeating_calls_are_no_longer_intercepted(fake_tools):
+    """循环守卫已卸掉：重复调用由模型自己决定，只有轮数上限兜底。"""
     llm = FakeLLM([{"action": "tool", "tool": "demo.read", "args": {"q": "same"}}])
     run = agent_runtime.AgentRun("反复查同一个东西", "c1")
     run.max_turns = 5
     while run.status == "running" and run.turn < run.max_turns:
         agent_runtime._turn(run, llm)
 
-    assert len(fake_tools) == 2, f"第三次应被拦下，实际执行 {len(fake_tools)} 次"
+    assert len(fake_tools) == 5, f"守卫不该中途拦下，实际只执行 {len(fake_tools)} 次"
     told = " ".join(str(message["content"]) for message in run.messages)
-    assert "别再重复" in told
+    assert "别再重复" not in told
 
 
 def test_switching_tools_is_not_treated_as_a_loop(fake_tools):
@@ -368,7 +364,8 @@ def test_system_and_user_text_are_never_shortened(fake_tools, monkeypatch):
 # ── 重复失败保护 ─────────────────────────────────────────
 
 
-def test_same_failing_call_is_blocked_after_two(fake_tools, monkeypatch):
+def test_failing_calls_are_no_longer_intercepted(fake_tools, monkeypatch):
+    """失败也不再由守卫截断，模型自己决定换招还是收尾。"""
     calls = []
 
     def failing(tool, args, timeout=60.0):
@@ -382,9 +379,7 @@ def test_same_failing_call_is_blocked_after_two(fake_tools, monkeypatch):
     while run.status == "running" and run.turn < run.max_turns:
         agent_runtime._turn(run, llm)
 
-    assert len(calls) == 2, f"应该只真的执行两次，实际 {len(calls)}"
-    told = " ".join(str(m["content"]) for m in run.messages)
-    assert "已经失败两次" in told
+    assert len(calls) == 5, f"守卫不该中途拦下，实际只执行 {len(calls)} 次"
 
 
 def test_finished_run_is_archived_into_memory(monkeypatch, fake_tools):

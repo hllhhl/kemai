@@ -625,45 +625,12 @@ def _turn(run: AgentRun, llm) -> str:
                            "risk": verdict["risk"], "reason": verdict["reason"]}
             return "blocked"
 
-        signature = tool_name + "|" + json.dumps(args, ensure_ascii=False, sort_keys=True)
-        if run.failed_calls.get(signature, 0) >= 2:
-            _observe(run, tool_name, "同样的调用已经失败两次了。换一种方式，或者直接告诉用户这一步做不到，不要再重复。")
-            audit.record(tool=tool_name, args=args, decision="allow", ok=False, run_id=run.id,
-                         conversation_id=run.conversation_id, course_id=run.course_id,
-                         error="重复失败已拦截")
-            return "continue"
-
-        # 失败计数管不到"成功了但没进展"。查两遍同一份课程简介，第二次纯属浪费一轮模型调用。
-        guard = note_call(run, tool_name, signature)
-        if guard == "halt":
-            # 第一版直接把 answer 覆盖成"信息不足"，结果把前面已经成功的
-            # 导入/笔记全抹掉了。现在：先拦下这次工具调用，强令模型用已有
-            # 结果输出 final；只有连着两次还不听才强制结束，且不覆盖已有答案。
-            run.halt_streak += 1
-            audit.record(tool=tool_name, args=args, decision="allow", ok=False, run_id=run.id,
-                         conversation_id=run.conversation_id, course_id=run.course_id,
-                         error="循环守卫：重复调用已拦下，改用已有结果收尾")
-            if run.halt_streak >= 2 or run.tool_totals.get(tool_name, 0) >= TOOL_HALT + 2:
-                run.status = "done"
-                if not run.answer:
-                    done_steps = [step.get("tool") for step in run.steps if step.get("tool")]
-                    run.answer = ("重复调用已停止。上面这些步骤已经执行完："
-                                  + "、".join(dict.fromkeys(done_steps)) +
-                                  "。请查看界面里的工具轨迹确认结果；还缺的部分可以再让我接着做。")
-                return "done"
-            _observe(run, tool_name,
-                     "这次工具调用已被循环守卫拦下，没有执行。不要再调任何工具，"
-                     "现在必须用上面已经拿到的结果输出 {\"action\": \"final\", \"answer\": \"...\"}，"
-                     "把已完成的事如实说清楚，不要说'信息不足'。")
-            return "continue"
-        if guard == "warn":
-            # 只提示不拦：第二次常常是换了说法的重试，拦掉可能丢掉本来拿得到的结果
-            _observe(run, tool_name,
-                     f"{tool_name} 刚刚调用过，结果就在上面的上下文里。这次若没有新的理由，就别再重复。")
-            audit.record(tool=tool_name, args=args, decision="allow", ok=False, run_id=run.id,
-                         conversation_id=run.conversation_id, course_id=run.course_id,
-                         error="循环守卫：重复调用已提示")
-
+        # 循环守卫已卸掉。
+        # 用户明确要求：Agent 该自己决定何时停，不该被防呆逻辑中途截断。
+        # 之前三版守卫分别造成过：把已完成成果抹成「信息不足」、只提示不
+        # 终止导致 80 步空转、以及该拦时没拦住。唯一剩下的兜底是轮数上限
+        # （资源限制，不是行为判断），到顶后 _close_out 如实说明即可。
+        # note_call() 保留仅供单元测试，不再接入主循环。
         started = time.time()
         if tool_name.startswith("kemai."):
             result = course_tools.call(tool_name, args, run.course_id)
@@ -677,8 +644,7 @@ def _turn(run: AgentRun, llm) -> str:
             error="" if result["ok"] else result["text"][:200],
             approved_by="user" if run.steps[-1].get("approved") else "",
         )
-        if not result["ok"]:
-            run.failed_calls[signature] = run.failed_calls.get(signature, 0) + 1
+        # 失败只留在步骤轨迹里，不再计数拦截
         run.steps[-1].update({"ok": result["ok"], "output": result["text"][:400]})
         _observe(run, tool_name, result["text"])
         return "continue"
@@ -692,7 +658,7 @@ def _close_out(run: AgentRun) -> None:
     """轮数用完还没结论时，给一句诚实的话，别装作完成了。"""
     if run.status == "running":
         run.status = "done"
-        run.answer = run.answer or (f"已经走了 {run.max_turns} 步还没收尾。可以让我继续，或把任务拆小一点。")
+        run.answer = run.answer or (f"已经走了 {run.max_turns} 步，我把已经做到的事列在下面的步骤轨迹里；可以让我继续。")
 
 
 def advance(run: AgentRun, llm) -> dict:
