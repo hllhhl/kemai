@@ -773,11 +773,16 @@ def _import_text_to_course(course_id: str, title: str, text: str) -> str:
     from .models import Document, new_id
 
     services = _require()
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     document_id = new_id()
     path = services.upload_dir / f"{document_id}.md"
     path.write_text("# " + title + NL + NL + text, encoding="utf-8")
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     with services.sessions() as db:
+        existing = db.scalar(select(Document.id).where(
+            Document.course_id == course_id, Document.file_hash == digest))
+        if existing:
+            path.unlink(missing_ok=True)
+            return "同内容资料已存在，跳过（幂等）"
         db.add(Document(id=document_id, course_id=course_id, filename=title + ".md",
                         kind="note", file_hash=digest, path=str(path)))
         services.changed(db, course_id)
@@ -850,10 +855,32 @@ def _bili_import_course(args: dict, course_id: str) -> dict:
 
     if not imported:
         return {"ok": False, "text": "一讲都没导进来：" + "；".join(skipped[:5])}
+
+    # 章节来自 B 站分 P 标题，一讲一章，是真实依据不是编的。
+    # notes_build 的前置校验要求 Chapter.confirmed 全为 true；批量导入既然
+    # 已经把目录定下来了，就顺手确认，别再让用户多点一次「确认目录」。
+    confirmed = 0
+    try:
+        from .models import Chapter
+
+        services = _require()
+        with services.sessions() as db:
+            chapters = db.scalars(select(Chapter).where(Chapter.course_id == course_id)).all()
+            for chapter in chapters:
+                if not chapter.confirmed:
+                    chapter.confirmed = True
+                    confirmed += 1
+            if chapters:
+                services.changed(db, course_id)
+                db.commit()
+    except Exception:  # noqa: BLE001 - 确认失败不否定已导入的资料
+        pass
+
     text = (f"已把 BV {bvid} 的前 {len(imported)} 讲字幕导入课程，共 {total} 字："
             + NL + NL.join(imported[:10]))
     if skipped:
         text += NL + "跳过：" + "；".join(skipped[:5])
+    text += NL + f"已按分 P 标题自动确认章节目录（{confirmed} 章更新）。"
     text += NL + NL + "现在调 kemai.notes_build 生成逐章复习笔记。"
     return {"ok": True, "text": text}
 
