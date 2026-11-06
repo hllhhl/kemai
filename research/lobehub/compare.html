@@ -66,7 +66,7 @@
       <tr><td>多 Agent 协作</td><td>AgentGroup、AddAgentMemberModal、ChiefAgent、HeterogeneousAgent、GroupChat、Parallel</td><td><span class="tag no">没有</span></td><td>一次只能跑一个 Agent run，没有群组和并行</td></tr>
       <tr><td>文档与画布</td><td>Pages、PageEditor、EditorCanvas、FileTree、FileViewer、DocumentModal、CanvasStorage</td><td><span class="tag part">部分</span></td><td>能导出 Word/PPT、资料检索、原文依据跳转；没有可协作编辑的文档/画布</td></tr>
       <tr><td>文件与工作区</td><td>Workspace、WorkspaceSetting、Projects、SandboxDrive、WorkingDirectory、ResourceManager</td><td><span class="tag no">没有</span></td><td>资料是「课程」维度，不是项目/工作区；没有沙箱文件系统</td></tr>
-      <tr><td>多模态</td><td>AttachmentInput、AudioPlayer、Generation、ArtworkStudio、Visual Recognition</td><td><span class="tag no">没有</span></td><td>能上传 PDF/Word/PPT，但 Agent 对话里不能贴图提问，没有语音输入/朗读、图片生成</td></tr>
+      <tr><td>多模态</td><td>AttachmentInput、AudioPlayer、Generation、ArtworkStudio、Visual Recognition</td><td><span class="tag part">部分</span></td><td>贴图提问已可用（最多 4 张、每张 4MB，模型需开启视觉）；没有语音输入/朗读、图片生成</td></tr>
       <tr><td>命令与快捷键</td><td>CommandMenu、HotkeyHelperPanel、PromptTransform、SettingsSearch</td><td><span class="tag no">没有</span></td><td>只有 Enter 发送 / Shift+Enter 换行 / Esc 关菜单；没有命令面板和设置搜索</td></tr>
       <tr><td>用量与计费</td><td>AgentUsage、AgentQuotaCalendar、Tokens 计数、SubscriptionAccounts</td><td><span class="tag part">部分</span></td><td>后端记录 token_usage，界面有 TokenUsage 组件，但聊天页没显示本次消耗</td></tr>
       <tr><td>分享与导出</td><td>Share、ShareModal、SharePopover、DataImporter、HeteroSessionImport</td><td><span class="tag no">没有</span></td><td>能导出笔记为 Word/PPT，不能导出/分享对话，也不能导入别人的会话</td></tr>
@@ -88,7 +88,8 @@
     <div class="gap done"><b>已完成 · 消息分支</b><span>重试保留旧版本，可展开对比</span></div>
     <div class="gap p3"><b>剩余 · Agent 角色与技能市场</b><span>目前固定一个「课脉」，不能建不同专长角色或安装社区技能</span></div>
     <div class="gap p3"><b>剩余 · 多 Agent 并行 / 群组</b><span>一次只能跑一个 run，复杂问题不能拆给几个 Agent 同时做</span></div>
-    <div class="gap p3"><b>剩余 · 图片输入与语音</b><span>不能截图直接问，也没有语音输入 / 朗读</span></div>
+    <div class="gap done"><b>已完成 · 图片输入（贴图提问）</b><span>＋菜单选图、缩略图预览、随消息发给模型；实测模型正确描述「红色圆形中间蓝色正方形」</span></div>
+    <div class="gap p3"><b>剩余 · 语音输入与朗读</b><span>不能说话提问，也不能把回答读出来</span></div>
     <div class="gap p3"><b>剩余 · 定时 / 每日简报 / IM 接入</b><span>没有人不在时自动跑、自动汇报的能力</span></div>
   </div>
 

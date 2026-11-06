@@ -490,15 +490,34 @@ def call_tool(tool_name: str, args: dict, timeout: float = 60.0) -> dict:
 # ── 循环 ─────────────────────────────────────────────────
 
 
+def _user_message(goal: str, images: list[dict] | None) -> dict:
+    """一条 user 消息。带图时换成 pi-ai 的多模态 content 块。
+
+    bridge.mjs 和 SDK 都认 {type:'image', data:<base64>, mimeType}，
+    OpenAI 适配器会把它转成 data:image/...;base64,... 的 image_url。
+    没图就还是纯字符串，别给所有请求都套一层数组。
+    """
+    if not images:
+        return {"role": "user", "content": goal}
+    blocks: list[dict] = [{"type": "text", "text": goal}]
+    for image in images:
+        blocks.append({
+            "type": "image",
+            "data": image["data"],
+            "mimeType": image.get("mime_type") or "image/png",
+        })
+    return {"role": "user", "content": blocks}
+
+
 def start(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
-          conversation_id: str = "") -> dict:
+          conversation_id: str = "", images: list[dict] | None = None) -> dict:
     _gc()
     # 和 stream 保持一致：不传就给一个 id，否则这条路径的对话永远存不下来
     conversation_id = conversation_id or uuid.uuid4().hex
     run = AgentRun(goal, course_id, max_turns, conversation_id)
     run.messages = [
         {"role": "system", "content": _system_prompt()},
-        {"role": "user", "content": goal},
+        _user_message(goal, images),
     ]
     _runs[run.id] = run
     return advance(run, llm)
@@ -671,7 +690,7 @@ def advance(run: AgentRun, llm) -> dict:
 
 
 def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
-           conversation_id: str = ""):
+           conversation_id: str = "", images: list[dict] | None = None):
     """边跑边报：每一步结束就吐一个事件。
 
     同步跑 4 轮要 85 秒，界面只能转圈。流式之后用户能看到它先查了什么、
@@ -686,7 +705,7 @@ def stream(llm, goal: str, course_id: str = "", max_turns: int = MAX_TURNS,
     # 但本次的工具结果仍然排在最后，优先于旧记忆
     run.messages = [{"role": "system", "content": _system_prompt(course_id)}]
     run.messages.extend(_history(conversation_id))
-    run.messages.append({"role": "user", "content": goal})
+    run.messages.append(_user_message(goal, images))
     _runs[run.id] = run
     usage = TokenUsage()
     yield {"type": "run", "run_id": run.id, "max_turns": run.max_turns,

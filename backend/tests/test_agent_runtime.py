@@ -607,3 +607,91 @@ def test_renaming_and_pinning_a_conversation(tmp_path, monkeypatch, fake_tools):
     # 重启后仍然生效
     agent_runtime._conversations.clear()
     assert agent_runtime.load_conversation(cid)["title"] == "新名字"
+
+
+def test_user_message_carries_images_in_sdk_format():
+    """图片块必须是 pi-ai 认的 {type,data,mimeType}，不是 OpenAI 的 image_url。"""
+    from app.agent_runtime import _user_message
+
+    message = _user_message("这张图讲了什么", [
+        {"data": "AAAA", "mime_type": "image/jpeg"},
+        {"data": "BBBB", "mime_type": "image/png"},
+    ])
+    assert message["role"] == "user"
+    assert isinstance(message["content"], list)
+    assert message["content"][0] == {"type": "text", "text": "这张图讲了什么"}
+    assert message["content"][1] == {"type": "image", "data": "AAAA", "mimeType": "image/jpeg"}
+    assert message["content"][2]["mimeType"] == "image/png"
+
+
+def test_plain_message_stays_a_string():
+    """没图时不套数组，免得每个请求都多一层结构。"""
+    from app.agent_runtime import _user_message
+
+    assert _user_message("你好", None) == {"role": "user", "content": "你好"}
+    assert _user_message("你好", []) == {"role": "user", "content": "你好"}
+
+
+def test_images_reach_the_model_on_both_entry_points(fake_tools):
+    """start 和 stream 都要把图片放进消息，别只改了一边。"""
+    images = [{"data": "AAAA", "mime_type": "image/png"}]
+
+    class CaptureLLM(FakeLLM):
+        seen: list[list[dict]] = []
+
+        def complete(self, messages, json_mode=False):  # noqa: ARG002
+            self.seen.append([dict(item) for item in messages])
+            return super().complete(messages, json_mode=json_mode)
+
+    script = [{"action": "final", "answer": "这是一个足够长的结论，用来完成这一轮。"}]
+    first = CaptureLLM(script)
+    agent_runtime.start(first, "看图", "c1", max_turns=2, images=images)
+    assert first.seen[0][-1]["content"][1]["type"] == "image"
+
+    second = CaptureLLM(script)
+    list(agent_runtime.stream(second, "看图", "c1", max_turns=2, images=images))
+    assert second.seen[0][-1]["content"][1]["type"] == "image"
+
+
+def test_user_message_carries_images_in_sdk_format():
+    """图片块必须是 pi-ai 认的 {type,data,mimeType}，不是 OpenAI 的 image_url。"""
+    from app.agent_runtime import _user_message
+
+    message = _user_message("这张图讲了什么", [
+        {"data": "AAAA", "mime_type": "image/jpeg"},
+        {"data": "BBBB", "mime_type": "image/png"},
+    ])
+    assert message["role"] == "user"
+    assert isinstance(message["content"], list)
+    assert message["content"][0] == {"type": "text", "text": "这张图讲了什么"}
+    assert message["content"][1] == {"type": "image", "data": "AAAA", "mimeType": "image/jpeg"}
+    assert message["content"][2]["mimeType"] == "image/png"
+
+
+def test_plain_message_stays_a_string():
+    """没图时不套数组，免得每个请求都多一层结构。"""
+    from app.agent_runtime import _user_message
+
+    assert _user_message("你好", None) == {"role": "user", "content": "你好"}
+    assert _user_message("你好", []) == {"role": "user", "content": "你好"}
+
+
+def test_images_reach_the_model_on_both_entry_points(fake_tools):
+    """start 和 stream 都要把图片放进消息，别只改了一边。"""
+    images = [{"data": "AAAA", "mime_type": "image/png"}]
+
+    class CaptureLLM(FakeLLM):
+        seen: list[list[dict]] = []
+
+        def complete(self, messages, json_mode=False):  # noqa: ARG002
+            self.seen.append([dict(item) for item in messages])
+            return super().complete(messages, json_mode=json_mode)
+
+    script = [{"action": "final", "answer": "这是一个足够长的结论，用来完成这一轮。"}]
+    first = CaptureLLM(script)
+    agent_runtime.start(first, "看图", "c1", max_turns=2, images=images)
+    assert first.seen[0][-1]["content"][1]["type"] == "image"
+
+    second = CaptureLLM(script)
+    list(agent_runtime.stream(second, "看图", "c1", max_turns=2, images=images))
+    assert second.seen[0][-1]["content"][1]["type"] == "image"

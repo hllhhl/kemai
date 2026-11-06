@@ -33,11 +33,11 @@ type AssistantMessage = {
   versions: string[]
   maxTurns: number
 }
-type UserMessage = { role: 'user'; text: string }
+type UserMessage = { role: 'user'; text: string; images?: string[] }
 type Message = UserMessage | AssistantMessage
 
 type OldTask = { id: string; title: string; message: string; status: string; created_at: string }
-type ModelInfo = { model: string; model_name: string; provider_name: string; configured: boolean }
+type ModelInfo = { model: string; model_name: string; provider_name: string; configured: boolean; supports_images?: boolean }
 type RegistryModel = { id: string; name: string; api: string }
 type RegistryProvider = { id: string; name: string; configured: boolean; models: RegistryModel[] }
 type Registry = { providers: RegistryProvider[]; active: { provider_id: string; model_id: string } | null }
@@ -86,8 +86,17 @@ const menuLoading = ref(false)
 const attached = ref<{ id: string; filename: string }[]>([])
 const uploading = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
+const imageInput = ref<HTMLInputElement | null>(null)
+type AttachedImage = { id: string; name: string; url: string; data: string; mime_type: string }
+const attachedImages = ref<AttachedImage[]>([])
+const IMAGE_LIMIT = 4
+const IMAGE_BYTES = 4 * 1024 * 1024
 const exporting = ref('')
 const notice = ref('')
+
+const imageWarning = computed(
+  () => attachedImages.value.length > 0 && model.value?.configured === true && model.value?.supports_images !== true,
+)
 
 let controller: AbortController | null = null
 let ticker: ReturnType<typeof setInterval> | null = null
@@ -333,6 +342,52 @@ async function pickFiles(event: Event) {
   }
 }
 
+function readImage(file: File): Promise<AttachedImage> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error(`读不了 ${file.name}`))
+    reader.onload = () => {
+      const url = String(reader.result || '')
+      const comma = url.indexOf(',')
+      resolve({
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        name: file.name,
+        url,
+        data: comma >= 0 ? url.slice(comma + 1) : url,
+        mime_type: file.type || 'image/png',
+      })
+    }
+    reader.readAsDataURL(file)
+  })
+}
+
+async function pickImages(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  input.value = ''
+  menuOpen.value = false
+  if (!files.length) return
+  for (const file of files) {
+    if (attachedImages.value.length >= IMAGE_LIMIT) {
+      notice.value = `一次最多贴 ${IMAGE_LIMIT} 张图`
+      break
+    }
+    if (file.size > IMAGE_BYTES) {
+      notice.value = `「${file.name}」超过 4 MB，换一张小一点的`
+      continue
+    }
+    try {
+      attachedImages.value.push(await readImage(file))
+    } catch (e) {
+      notice.value = e instanceof Error ? e.message : String(e)
+    }
+  }
+}
+
+function removeImage(id: string) {
+  attachedImages.value = attachedImages.value.filter((item) => item.id !== id)
+}
+
 async function exportDoc(kind: 'docx' | 'pptx') {
   if (!props.courseId) return
   exporting.value = kind
@@ -409,11 +464,14 @@ function scrollToEnd() {
 async function send(text?: string, opts: { reuseUser?: boolean; versions?: string[] } = {}) {
   const goal = (text ?? draft.value).trim()
   if (!props.courseId || !goal || busy.value) return
+  const images = attachedImages.value.map((item) => ({ data: item.data, mime_type: item.mime_type }))
+  const previews = attachedImages.value.map((item) => item.url)
+  attachedImages.value = []
   if (text === undefined) draft.value = ''
   menuOpen.value = false
   notice.value = ''
   oldTask.value = null
-  if (!opts.reuseUser) history.value.push({ role: 'user', text: goal })
+  if (!opts.reuseUser) history.value.push({ role: 'user', text: goal, images: previews })
   const reply: AssistantMessage = {
     role: 'assistant', text: '', steps: [], status: 'running', seconds: 0, error: '',
     pending: null, usage: null, suggestions: [], versions: opts.versions || [], maxTurns: 6,
@@ -428,7 +486,10 @@ async function send(text?: string, opts: { reuseUser?: boolean; versions?: strin
     const response = await fetch(`${API_BASE}/agent/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ goal, course_id: props.courseId || '', max_turns: 6, conversation_id: conversationId.value }),
+      body: JSON.stringify({
+        goal, course_id: props.courseId || '', max_turns: 6,
+        conversation_id: conversationId.value, images,
+      }),
       signal: controller.signal,
     })
     if (!response.ok) throw new Error(`请求失败（${response.status}）`)
@@ -683,7 +744,12 @@ watch(() => props.taskId, (id) => {
               </div>
             </div>
             <div v-else class="bubble-wrap">
-              <div class="bubble">{{ item.text }}</div>
+              <div class="bubble">
+                <div v-if="item.images?.length" class="bubble-images">
+                  <img v-for="(src, imageIndex) in item.images" :key="imageIndex" :src="src" alt="附图" />
+                </div>
+                {{ item.text }}
+              </div>
               <button class="edit-trigger" title="编辑这条消息" @click="startEdit(index)">✎</button>
             </div>
           </div>
@@ -763,6 +829,9 @@ watch(() => props.taskId, (id) => {
                 <button class="menu-item" role="menuitem" :disabled="uploading" @click="fileInput?.click()">
                   <span>添加文件</span><small>{{ uploading ? '上传中…' : '课件、Word、PPT、PDF' }}</small>
                 </button>
+                <button class="menu-item" role="menuitem" @click="imageInput?.click()">
+                  <span>添加图片</span><small>贴图提问，最多 {{ IMAGE_LIMIT }} 张 · 每张 4 MB</small>
+                </button>
               </div>
               <div class="menu-group">
                 <p class="menu-title">技能 · {{ menuLoading ? '读取中…' : `${skills.length} 个` }}</p>
@@ -788,6 +857,17 @@ watch(() => props.taskId, (id) => {
               </div>
             </div>
           </div>
+
+          <div v-if="attachedImages.length" class="image-tray">
+            <div v-for="img in attachedImages" :key="img.id" class="image-chip">
+              <img :src="img.url" :alt="img.name" />
+              <button title="移除这张图" @click="removeImage(img.id)">×</button>
+            </div>
+          </div>
+          <p v-if="imageWarning" class="image-warning">
+            当前模型没开启「支持图片输入」，发出去会被拦下。
+            <button class="text-button" @click="emit('open-models')">去模型配置勾选</button>
+          </p>
 
           <textarea
             ref="box"
@@ -842,6 +922,7 @@ watch(() => props.taskId, (id) => {
       </div>
 
       <input ref="fileInput" type="file" multiple hidden accept=".pdf,.docx,.pptx,.md,.txt" @change="pickFiles" />
+      <input ref="imageInput" type="file" multiple hidden accept="image/*" @change="pickImages" />
     </template>
   </div>
 </template>
@@ -923,6 +1004,14 @@ watch(() => props.taskId, (id) => {
 .notice-line { margin-bottom: 6px; font-size: 12px; color: var(--accent-dark); }
 .composer { position: relative; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 4px 18px rgba(24, 34, 54, .06); padding: 10px 12px 8px; }
 .composer textarea { width: 100%; border: 0; outline: 0; resize: none; font: inherit; font-size: 13.5px; line-height: 1.7; background: transparent; padding: 2px 0 6px 34px; max-height: 160px; }
+
+.image-tray { display: flex; flex-wrap: wrap; gap: 8px; padding: 2px 0 8px 4px; }
+.image-chip { position: relative; width: 62px; height: 62px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.image-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.image-chip button { position: absolute; top: 0; right: 0; width: 18px; height: 18px; border: 0; border-radius: 0 0 0 6px; background: rgba(28, 37, 54, .72); color: #fff; font-size: 12px; line-height: 1; cursor: pointer; font-family: inherit; }
+.image-warning { margin: 0 0 6px 4px; font-size: 11.5px; color: var(--warning); }
+.bubble-images { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.bubble-images img { max-width: 180px; max-height: 140px; border-radius: 8px; display: block; }
 .composer-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .foot-hint { font-size: 11px; color: var(--muted); margin-left: 30px; }
 .foot-right { display: flex; align-items: center; gap: 10px; }

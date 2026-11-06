@@ -71,12 +71,20 @@ class McpImportInput(BaseModel):
     overwrite: bool = False
 
 
+class ImageInput(BaseModel):
+    """贴图提问时的一张图。data 是不带 data: 前缀的 base64。"""
+
+    data: str = Field(min_length=1, max_length=7_000_000)
+    mime_type: str = Field(default="image/png", max_length=64)
+
+
 class AgentStartInput(BaseModel):
     goal: str = Field(min_length=1, max_length=4000)
     course_id: str = ""
     max_turns: int = Field(default=6, ge=1, le=12)
     # 同一个 conversation_id 的多次运行共享上下文；空串表示每次全新
     conversation_id: str = ""
+    images: list[ImageInput] = Field(default_factory=list, max_length=4)
 
 
 class AgentResumeInput(BaseModel):
@@ -275,6 +283,21 @@ def register_workspace_routes(app, services) -> None:
         except importers.ImportError_ as exc:
             raise _fail(exc) from exc
 
+    def _require_image_support(images):
+        """模型没声明支持视觉就别让它拿着图片瞎猜。
+
+        bridge 也会拦（image_not_supported），但那要等一次模型调用、还只给个码；
+        在这里直接说清该去哪儿改配置，用户不用白等。
+        """
+        if not images:
+            return
+        config = services.model_config.snapshot()
+        if not config.supports_images:
+            raise HTTPException(
+                422,
+                "当前模型没有开启「支持图片输入」。到「模型配置」里勾选该模型的能力后，就能贴图提问。",
+            )
+
     # ── Agent：模型自己选工具、自己调 ─────────────────────
     @app.post("/agent/run")
     def agent_run(payload: AgentStartInput):
@@ -288,9 +311,11 @@ def register_workspace_routes(app, services) -> None:
         run_id = ""
         pending = None
         answer = ""
+        _require_image_support(payload.images)
         for event in runtime.stream(
             services.llm, payload.goal, payload.course_id,
             payload.max_turns, payload.conversation_id,
+            images=[image.model_dump() for image in payload.images],
         ):
             if event["type"] == "run":
                 run_id = event["run_id"]
@@ -314,6 +339,10 @@ def register_workspace_routes(app, services) -> None:
         """
         from fastapi.responses import StreamingResponse
 
+        # 放在生成器外面：HTTPException 才会变成 422，而不是被 events() 的
+        # except 吞成一条 SSE error 事件。
+        _require_image_support(payload.images)
+
         def events():
             def pack(event: dict) -> str:
                 # SSE 要求每个事件以空行结束，用显式换行拼，别依赖 f-string 里的转义
@@ -323,6 +352,7 @@ def register_workspace_routes(app, services) -> None:
                 for event in agent_runtime.stream(
                     services.llm, payload.goal, payload.course_id,
                     payload.max_turns, payload.conversation_id,
+                    images=[image.model_dump() for image in payload.images],
                 ):
                     yield pack(event)
             except Exception as exc:  # noqa: BLE001 - 出错也要让前端收到一条可读的消息
