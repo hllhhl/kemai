@@ -601,9 +601,14 @@ def _bili_parts(args: dict, _course_id: str) -> dict:
     except BilibiliError as exc:
         return {"ok": False, "text": f"读取视频失败：{exc}"}
     pages = list(getattr(video, "pages", ()) or ())
+
+    def field(item, name, default=""):
+        # BiliPage 是 dataclass；也兼容将来换成 dict 的情况
+        return item.get(name, default) if isinstance(item, dict) else getattr(item, name, default)
+
     lines = [f"课程：{getattr(video, 'title', '')} | BV {bvid} | 共 {len(pages)} 讲"]
     for page in pages[:40]:
-        lines.append(f"- 第 {page.get('page', '?')} 讲 | cid={page.get('cid')} | {page.get('part', '')}")
+        lines.append(f"- 第 {field(page, 'page', '?')} 讲 | cid={field(page, 'cid')} | {field(page, 'part', '')}")
     return {"ok": True, "text": NL.join(lines)}
 
 
