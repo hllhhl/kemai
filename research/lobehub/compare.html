@@ -75,6 +75,17 @@
     </tbody>
   </table>
 
+  <h2>二·补、另外搜到的教育 Agent，落地的能力</h2>
+  <p class="sub" style="margin-bottom:14px">对照对象：hermes-edu-skills（135★，170 个中文教育场景）、ai-shifu（331★，个性化讲解）、education-agent-skills（955★，证据锚定）、frametell（477★，材料转讲解视频，过重未做）。</p>
+  <div class="gap-grid">
+    <div class="gap done"><b>教育场景库 · 170 个场景</b><span>hermes-edu-skills 整仓作为软件内置只读资源（catalog + SKILL.md，1.8MB），按分类/学段/学科筛选，读详情、填参数、一键生成任务；<b>不装进用户 skills 目录</b></span></div>
+    <div class="gap done"><b>场景 → 课脉工具映射</b><span>requiresTools 里的 practice.generate_items / mistake.query_recent / curriculum.resolve 等，生成目标时翻译成 kemai.practice_read / kemai.wrong_read / kemai.course_brief</span></div>
+    <div class="gap done"><b>学习者档案（ai-shifu）</b><span>学段/目标/水平/薄弱点/讲解偏好填一次，落盘到 data/edu-profile.json，自动注入每次 Agent 对话的 system 提示词</span></div>
+    <div class="gap done"><b>澄清追问 + 证据标注</b><span>信息不足先问 1 个最关键问题；涉及课件时说清依据来自哪一章/页并提醒适用边界</span></div>
+    <div class="gap done"><b>复习计划生成</b><span>结合课程章节、最近错题、学习者档案与关注点，按天生成可检查的计划，可导出 Markdown（实测 3 天 / 1329 字，引用了真实错题与笔记）</span></div>
+    <div class="gap p3"><b>未做 · 材料转讲解视频（frametell）</b><span>需要分镜、配音、渲染与视频编码，远超单机课程助手的范围</span></div>
+  </div>
+
   <h2>三、对照后这一轮做了什么（8 项），还剩什么（4 项）</h2>
   <p class="sub" style="margin-bottom:14px">已装版本 2026-11-05 23:26 构建。下面每一项都跑过真实请求或界面点击，不是计划。</p>
   <div class="gap-grid">

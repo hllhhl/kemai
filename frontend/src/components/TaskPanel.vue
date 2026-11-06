@@ -60,6 +60,14 @@ const modelWrap = ref<HTMLElement | null>(null)
 
 // 历史对话：后端把每轮对话落盘，这里只是读列表
 type SessionRow = { id: string; title: string; course_id: string; updated_at: number; messages: number; pinned: boolean }
+type Facet = { value: string; count: number }
+type EduFacets = { total: number; categories: Facet[]; stages: Facet[]; subjects: Facet[]; scenarios: Facet[] }
+type EduItem = {
+  slug: string; title: string; description: string; category: string
+  stages: string[]; grades: string[]; subjects: string[]; abilities: string[]
+  scenarios: string[]; requiresData: string[]; requiresTools: string[]; path: string
+}
+type EduDetail = EduItem & { markdown: string }
 const sessions = ref<SessionRow[]>([])
 const sessionsOpen = ref(false)
 const sessionsLoading = ref(false)
@@ -69,6 +77,32 @@ const copied = ref(-1)
 const editingIndex = ref(-1)
 const editText = ref('')
 const sessionQuery = ref('')
+
+// 教育场景库：软件内置的 170 个场景，不是用户 skills
+const eduOpen = ref(false)
+const eduLoading = ref(false)
+const eduFacets = ref<EduFacets | null>(null)
+const eduItems = ref<EduItem[]>([])
+const eduQuery = ref('')
+const eduCategory = ref('')
+const eduStage = ref('')
+const eduSubject = ref('')
+const eduDetail = ref<EduDetail | null>(null)
+const eduAnswers = ref<Record<string, string>>({})
+const eduBusy = ref(false)
+const eduView = ref<'list' | 'detail' | 'profile' | 'plan'>('list')
+const eduProfile = ref<Record<string, string>>({})
+const eduPlan = ref('')
+const eduPlanDays = ref(7)
+const eduPlanFocus = ref('')
+
+const PROFILE_FIELDS: { key: string; label: string }[] = [
+  { key: 'stage', label: '学段 / 年级' },
+  { key: 'goal', label: '当前目标' },
+  { key: 'level', label: '自评水平' },
+  { key: 'weakness', label: '薄弱点' },
+  { key: 'style', label: '偏好的讲解方式' },
+]
 
 const filteredSessions = computed(() => {
   const query = sessionQuery.value.trim().toLowerCase()
@@ -584,6 +618,125 @@ function useSuggestion(text: string) {
   void nextTick(() => box.value?.focus())
 }
 
+async function loadEdu() {
+  try {
+    if (!eduFacets.value) eduFacets.value = await api<EduFacets>('/edu/scenarios/facets')
+    await searchEdu()
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : String(e)
+  }
+}
+
+async function searchEdu() {
+  eduLoading.value = true
+  try {
+    const params = new URLSearchParams({ limit: '80' })
+    if (eduQuery.value.trim()) params.set('q', eduQuery.value.trim())
+    if (eduCategory.value) params.set('category', eduCategory.value)
+    if (eduStage.value) params.set('stage', eduStage.value)
+    if (eduSubject.value) params.set('subject', eduSubject.value)
+    const payload = await api<{ items: EduItem[] }>(`/edu/scenarios?${params.toString()}`)
+    eduItems.value = payload.items
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    eduLoading.value = false
+  }
+}
+
+async function toggleEdu() {
+  eduOpen.value = !eduOpen.value
+  if (!eduOpen.value) return
+  eduView.value = 'list'
+  eduDetail.value = null
+  await loadEdu()
+}
+
+async function openEduDetail(slug: string) {
+  eduBusy.value = true
+  try {
+    const detail = await api<EduDetail>(`/edu/scenarios/${slug}`)
+    eduDetail.value = detail
+    eduAnswers.value = Object.fromEntries((detail.requiresData || []).map((key) => [key, '']))
+    eduView.value = 'detail'
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    eduBusy.value = false
+  }
+}
+
+async function openEduProfile() {
+  eduBusy.value = true
+  try {
+    eduProfile.value = await api<Record<string, string>>('/edu/profile')
+    eduView.value = 'profile'
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    eduBusy.value = false
+  }
+}
+
+async function saveEduProfile() {
+  eduBusy.value = true
+  try {
+    eduProfile.value = await api<Record<string, string>>('/edu/profile', {
+      method: 'PUT', body: JSON.stringify(eduProfile.value),
+    })
+    eduView.value = 'list'
+    notice.value = '学习者档案已保存，之后的对话都会按它调整讲解'
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    eduBusy.value = false
+  }
+}
+
+async function generateEduPlan() {
+  eduBusy.value = true
+  eduPlan.value = ''
+  try {
+    const payload = await api<{ plan: string }>('/edu/study-plan', {
+      method: 'POST',
+      body: JSON.stringify({ course_id: props.courseId, days: eduPlanDays.value, focus: eduPlanFocus.value }),
+    })
+    eduPlan.value = payload.plan
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    eduBusy.value = false
+  }
+}
+
+function exportEduPlan() {
+  if (!eduPlan.value) return
+  const blob = new Blob([eduPlan.value], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `复习计划-${eduPlanDays.value}天.md`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+async function useEduScenario() {
+  if (!eduDetail.value || eduBusy.value) return
+  eduBusy.value = true
+  try {
+    const payload = await api<{ goal: string }>(`/edu/scenarios/${eduDetail.value.slug}/goal`, {
+      method: 'POST', body: JSON.stringify({ answers: eduAnswers.value }),
+    })
+    draft.value = payload.goal
+    eduOpen.value = false
+    await nextTick(() => box.value?.focus())
+  } catch (e) {
+    notice.value = e instanceof Error ? e.message : String(e)
+  } finally {
+    eduBusy.value = false
+  }
+}
+
 function exportConversation() {
   if (!history.value.length) return
   const lines = ['# 课脉对话记录', '']
@@ -703,6 +856,7 @@ watch(() => props.taskId, (id) => {
         <button class="bar-button" @click="toggleSessions">
           对话历史<span v-if="sessions.length"> · {{ sessions.length }}</span>
         </button>
+        <button class="bar-button" @click="toggleEdu">教育场景</button>
         <button class="bar-button" @click="reset">新对话</button>
         <button class="bar-button" :disabled="!history.length" @click="exportConversation">导出对话</button>
         <div v-if="sessionsOpen" class="sessions">
@@ -720,6 +874,104 @@ watch(() => props.taskId, (id) => {
           <p v-if="sessionsLoading" class="model-empty-row">读取中…</p>
           <p v-else-if="!filteredSessions.length" class="model-empty-row">{{ sessionQuery ? '没有匹配的对话' : '还没有历史对话' }}</p>
         </div>
+      </div>
+
+      <div v-if="eduOpen" class="edu-panel">
+        <div class="edu-head">
+          <div>
+            <strong>教育场景库</strong>
+            <small>软件内置 {{ eduFacets?.total || 170 }} 个场景 · 来自 hermes-edu-skills（MIT）</small>
+          </div>
+          <div class="edu-head-actions">
+            <button class="text-button" @click="openEduProfile">学习者档案</button>
+            <button class="text-button" @click="eduView = 'plan'; eduPlan = ''">复习计划</button>
+            <button class="text-button" @click="eduOpen = false">关闭</button>
+          </div>
+        </div>
+
+        <div v-if="eduView === 'detail' && eduDetail" class="edu-detail">
+          <button class="text-button" @click="eduView = 'list'">← 返回场景列表</button>
+          <h3>{{ eduDetail.title }}</h3>
+          <p class="muted">{{ eduDetail.description }}</p>
+          <div class="edu-tags">
+            <span v-for="tag in eduDetail.stages" :key="'st-' + tag" class="edu-tag">{{ tag }}</span>
+            <span v-for="tag in eduDetail.subjects" :key="'su-' + tag" class="edu-tag">{{ tag }}</span>
+            <span v-for="tag in eduDetail.scenarios" :key="'sc-' + tag" class="edu-tag">{{ tag }}</span>
+          </div>
+          <div v-if="eduDetail.requiresData.length" class="edu-form">
+            <p class="edu-label">按这个场景，补充几项就能开始（可留空）：</p>
+            <label v-for="key in eduDetail.requiresData" :key="key" class="edu-field">
+              {{ key }}
+              <input v-model="eduAnswers[key]" type="text" :placeholder="key" />
+            </label>
+          </div>
+          <details class="edu-skill">
+            <summary>查看这个场景的完整说明（SKILL.md）</summary>
+            <MarkdownContent :content="eduDetail.markdown" />
+          </details>
+          <button class="button primary" :disabled="eduBusy" @click="useEduScenario">
+            {{ eduBusy ? '生成中…' : '用这个场景生成任务' }}
+          </button>
+        </div>
+
+        <div v-else-if="eduView === 'profile'" class="edu-detail">
+          <button class="text-button" @click="eduView = 'list'">← 返回场景列表</button>
+          <h3>学习者档案</h3>
+          <p class="muted">填一次，之后每次对话都会自动按它调整讲解深度、例子和语气（参考 ai-shifu 的个性化讲解）。</p>
+          <div class="edu-form">
+            <label v-for="field in PROFILE_FIELDS" :key="field.key" class="edu-field">
+              {{ field.label }}
+              <input v-model="eduProfile[field.key]" type="text" :placeholder="field.label" />
+            </label>
+          </div>
+          <button class="button primary" :disabled="eduBusy" @click="saveEduProfile">
+            {{ eduBusy ? '保存中…' : '保存档案' }}
+          </button>
+        </div>
+
+        <div v-else-if="eduView === 'plan'" class="edu-detail">
+          <button class="text-button" @click="eduView = 'list'">← 返回场景列表</button>
+          <h3>复习计划</h3>
+          <p class="muted">按课程章节、最近错题和学习者档案排一份每天可检查的计划。</p>
+          <div class="edu-plan-controls">
+            <label>天数<input v-model.number="eduPlanDays" type="number" min="1" max="30" /></label>
+            <label>额外关注<input v-model="eduPlanFocus" type="text" placeholder="如：函数、CMOS 反相器" /></label>
+            <button class="button primary small" :disabled="eduBusy" @click="generateEduPlan">
+              {{ eduBusy ? '生成中…' : '生成计划' }}
+            </button>
+            <button v-if="eduPlan" class="text-button" @click="exportEduPlan">导出 Markdown</button>
+          </div>
+          <MarkdownContent v-if="eduPlan" :content="eduPlan" />
+          <p v-else-if="!eduBusy" class="model-empty-row">还没生成，点上面的按钮</p>
+        </div>
+
+        <template v-else>
+          <div class="edu-filters">
+            <input v-model="eduQuery" type="search" placeholder="搜索场景，如 错题 / 作文 / 单元复习" @keydown.enter="searchEdu" />
+            <select v-model="eduCategory" @change="searchEdu">
+              <option value="">全部分类</option>
+              <option v-for="facet in eduFacets?.categories || []" :key="facet.value" :value="facet.value">{{ facet.value }}（{{ facet.count }}）</option>
+            </select>
+            <select v-model="eduStage" @change="searchEdu">
+              <option value="">全部学段</option>
+              <option v-for="facet in eduFacets?.stages || []" :key="facet.value" :value="facet.value">{{ facet.value }}</option>
+            </select>
+            <select v-model="eduSubject" @change="searchEdu">
+              <option value="">全部学科</option>
+              <option v-for="facet in eduFacets?.subjects || []" :key="facet.value" :value="facet.value">{{ facet.value }}</option>
+            </select>
+            <button class="button subtle small" @click="searchEdu">筛选</button>
+          </div>
+          <p class="edu-count">匹配 {{ eduItems.length }} 个场景{{ eduLoading ? ' · 读取中…' : '' }}</p>
+          <div class="edu-grid">
+            <button v-for="item in eduItems" :key="item.slug" class="edu-card" @click="openEduDetail(item.slug)">
+              <span class="edu-card-cat">{{ item.category }}</span>
+              <strong>{{ item.title }}</strong>
+              <small>{{ item.description }}</small>
+            </button>
+          </div>
+          <p v-if="!eduLoading && !eduItems.length" class="model-empty-row">没有匹配的场景，换个筛选条件试试</p>
+        </template>
       </div>
 
       <div ref="thread" class="chat-scroll">
@@ -928,7 +1180,39 @@ watch(() => props.taskId, (id) => {
 </template>
 
 <style scoped>
-.chat-page { display: flex; flex-direction: column; height: calc(100vh - 96px); max-width: 860px; margin: 0 auto; }
+.chat-page { position: relative; display: flex; flex-direction: column; height: calc(100vh - 96px); max-width: 860px; margin: 0 auto; }
+
+.edu-panel { position: absolute; top: 38px; left: 0; right: 0; bottom: 0; z-index: 15; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgba(24, 34, 54, .12); display: flex; flex-direction: column; overflow: hidden; }
+.edu-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); flex: none; }
+.edu-head strong { font-size: 14px; }
+.edu-head small { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+.edu-head-actions { display: flex; align-items: center; gap: 10px; flex: none; }
+.edu-plan-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px; margin: 12px 0 16px; }
+.edu-plan-controls label { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--muted); }
+.edu-plan-controls input { border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; font: inherit; font-size: 12px; outline: 0; min-width: 120px; }
+.edu-plan-controls input[type="number"] { min-width: 70px; }
+.edu-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 14px 6px; flex: none; }
+.edu-filters input { flex: 1 1 220px; min-width: 0; border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; font: inherit; font-size: 12px; outline: 0; }
+.edu-filters input:focus { border-color: var(--accent-line); }
+.edu-filters select { border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; font: inherit; font-size: 12px; background: var(--surface); max-width: 150px; }
+.edu-count { margin: 2px 14px 8px; font-size: 11.5px; color: var(--muted); flex: none; }
+.edu-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 9px; padding: 0 14px 14px; align-content: start; }
+.edu-card { display: flex; flex-direction: column; gap: 4px; text-align: left; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 10px 12px; cursor: pointer; font-family: inherit; }
+.edu-card:hover { border-color: var(--accent-line); background: var(--soft); }
+.edu-card-cat { font-size: 10.5px; color: var(--accent-dark); }
+.edu-card strong { font-size: 12.5px; color: var(--ink); }
+.edu-card small { font-size: 11px; color: var(--muted); line-height: 1.55; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.edu-detail { flex: 1; overflow-y: auto; padding: 14px 18px 18px; }
+.edu-detail h3 { margin: 10px 0 6px; font-size: 17px; }
+.edu-tags { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0 14px; }
+.edu-tag { font-size: 10.5px; padding: 2px 8px; border-radius: 9px; background: var(--soft); color: var(--accent-dark); }
+.edu-label { margin: 0 0 8px; font-size: 12px; font-weight: 600; }
+.edu-form { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 12px; margin-bottom: 14px; }
+.edu-field { font-size: 11.5px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+.edu-field input { border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; font: inherit; font-size: 12px; outline: 0; }
+.edu-field input:focus { border-color: var(--accent-line); }
+.edu-skill { margin: 0 0 14px; border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; max-height: 260px; overflow-y: auto; }
+.edu-skill summary { cursor: pointer; font-size: 12px; color: var(--muted); }
 
 .chat-bar { position: relative; display: flex; align-items: center; gap: 8px; padding: 0 4px 6px; flex: none; }
 .bar-button { border: 1px solid transparent; background: transparent; color: var(--muted); font-size: 12px; padding: 4px 9px; border-radius: 8px; cursor: pointer; font-family: inherit; }

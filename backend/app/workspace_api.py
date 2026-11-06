@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from . import agent_runtime, audit, course_tools, longterm
+from . import edu_profile, edu_scenarios
 from . import importers
 from . import skills as skill_store
 from .concierge import plan as build_plan
@@ -102,6 +103,16 @@ class SuggestInput(BaseModel):
     goal: str = ""
     answer: str = ""
     course_id: str = ""
+
+
+class ScenarioAnswersInput(BaseModel):
+    answers: dict[str, str] = Field(default_factory=dict)
+
+
+class StudyPlanInput(BaseModel):
+    course_id: str = ""
+    days: int = Field(default=7, ge=1, le=30)
+    focus: str = Field(default="", max_length=300)
 
 
 def register_workspace_routes(app, services) -> None:
@@ -297,6 +308,67 @@ def register_workspace_routes(app, services) -> None:
                 422,
                 "当前模型没有开启「支持图片输入」。到「模型配置」里勾选该模型的能力后，就能贴图提问。",
             )
+
+    # ── 教育场景库：软件内置资源，不是用户 skills ──────────
+    @app.get("/edu/scenarios/facets")
+    def edu_scenario_facets():
+        """筛选项与总数。170 个场景从内置 catalog.json 读，不依赖网络。"""
+        return edu_scenarios.facets()
+
+    @app.get("/edu/scenarios")
+    def edu_scenario_list(q: str = "", category: str = "", stage: str = "",
+                          subject: str = "", limit: int = 60):
+        return {"items": edu_scenarios.search(q, category, stage, subject, limit)}
+
+    @app.get("/edu/scenarios/{slug}")
+    def edu_scenario_detail(slug: str):
+        item = edu_scenarios.detail(slug)
+        if item is None:
+            raise HTTPException(404, "没有这个场景")
+        return item
+
+    @app.post("/edu/scenarios/{slug}/goal")
+    def edu_scenario_goal(slug: str, payload: ScenarioAnswersInput):
+        goal = edu_scenarios.build_goal(slug, payload.answers)
+        if goal is None:
+            raise HTTPException(404, "没有这个场景")
+        return {"goal": goal}
+
+    @app.get("/edu/profile")
+    def edu_profile_get():
+        return edu_profile.load()
+
+    @app.put("/edu/profile")
+    def edu_profile_put(payload: dict):
+        return edu_profile.save(payload)
+
+    @app.post("/edu/study-plan")
+    def edu_study_plan(payload: StudyPlanInput):
+        """结合课程概况、最近错题和学习者档案，排一份可执行的复习计划。"""
+        from . import course_tools
+
+        brief = course_tools.call("kemai.course_brief", {}, payload.course_id)
+        wrong = course_tools.call("kemai.wrong_read", {"limit": 8}, payload.course_id)
+        profile = edu_profile.load()
+        profile_text = "\n".join(
+            f"- {edu_profile.LABELS[key]}：{profile[key]}" for key in edu_profile.FIELDS if profile[key]
+        ) or "（未填写，按普通学习者处理）"
+        prompt = [
+            {"role": "system", "content":
+                "你是学习规划助手。输出 Markdown，不要寒暄。"
+                f"按 {payload.days} 天排，每天一个二级标题，列 2-3 个具体动作和一条可检查的标准。"
+                "动作必须落到给定的章节、笔记或错题上，不要写「复习一下」这种空话。"},
+            {"role": "user", "content":
+                f"课程概况：\n{brief.get('text', '')[:1500]}\n\n"
+                f"最近错题：\n{wrong.get('text', '')[:1200]}\n\n"
+                f"学习者档案：\n{profile_text}\n\n"
+                f"额外关注：{payload.focus or '无'}"},
+        ]
+        try:
+            plan = services.llm.complete(prompt)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(502, f"生成计划失败：{type(exc).__name__}: {exc}") from exc
+        return {"plan": plan, "days": payload.days}
 
     # ── Agent：模型自己选工具、自己调 ─────────────────────
     @app.post("/agent/run")

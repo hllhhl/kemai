@@ -386,10 +386,12 @@ def _system_prompt(course_id: str = "") -> str:
     # 不能用 str.format：提示词里的 JSON 示例带花括号，会被当成占位符
     prompt = SYSTEM.replace("__TOOLS__", tools).replace("__SKILLS__", skills)
     try:
-        from . import longterm
+        from . import edu_profile, longterm
 
         memo = longterm.digest(course_id)
-    except Exception:  # noqa: BLE001 - 记忆坏了也不能让 agent 起不来
+        # 学习者档案：ai-shifu 那套个性化讲解，每次对话自动带上
+        prompt += edu_profile.as_prompt()
+    except Exception:  # noqa: BLE001 - 记忆或档案坏了也不能让 agent 起不来
         memo = ""
     if memo:
         # 放最后：越靠近当前问题，模型越会拿它当真；放最前面容易被长工具清单冲淡
