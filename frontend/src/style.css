@@ -452,3 +452,9 @@ a { color: var(--accent); text-underline-offset: 3px; }
 .task-dot.failed { background: var(--danger); }
 .task-dot.running { background: var(--warning); }
 .task-dot.planned { background: var(--accent); }
+
+
+.task-history-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; width: 100%; margin: 6px 0 3px; padding: 4px 6px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font: inherit; font-size: 11px; letter-spacing: .04em; cursor: pointer; font-family: inherit; }
+.task-history-head:hover { background: var(--surface); color: var(--ink); }
+.fold-caret { font-size: 12px; line-height: 1; }
+.task-history-sub { margin: 6px 0 2px; padding: 0 6px; font-size: 10.5px; color: var(--muted); opacity: .8; }

@@ -46,6 +46,10 @@ const biliLoginOpen = ref(false)
 const workspaceOpen = ref(false)
 const selectedTaskId = ref('')
 const tasks = ref<{ id: string; title: string; status: string; created_at: string }[]>([])
+type ConversationRow = { id: string; title: string; course_id: string; updated_at: number; messages: number; pinned: boolean }
+const conversations = ref<ConversationRow[]>([])
+const openSessionId = ref('')
+const historyCollapsed = ref(localStorage.getItem('kemai-history-collapsed') === '1')
 const taskBusy = ref(false)
 const biliLoggedIn = ref(false)
 const memoryBusy = ref(false)
@@ -132,13 +136,33 @@ function date(value: string) { const d = new Date(value); return Number.isNaN(d.
 function errorText(error: unknown) { return error instanceof Error ? error.message : String(error) }
 function clearFeedback() { actionError.value = ''; success.value = '' }
 async function loadTasks() {
-  if (!courseId.value) { tasks.value = []; return }
+  if (!courseId.value) { tasks.value = []; conversations.value = []; return }
   try {
     tasks.value = await api<{ id: string; title: string; status: string; created_at: string }[]>(
       `/tasks?course_id=${encodeURIComponent(courseId.value)}&limit=20`)
   } catch {
     tasks.value = []
   }
+  // Agent 对话存的是另一套文件（agent-sessions），旧版只看 /tasks 会漏掉
+  // 用户在聊天页新发的每一条对话。
+  try {
+    const payload = await api<{ conversations: ConversationRow[] }>(
+      `/agent/conversations?course_id=${encodeURIComponent(courseId.value)}&limit=30`)
+    conversations.value = payload.conversations
+  } catch {
+    conversations.value = []
+  }
+}
+
+function toggleHistory() {
+  historyCollapsed.value = !historyCollapsed.value
+  localStorage.setItem('kemai-history-collapsed', historyCollapsed.value ? '1' : '0')
+}
+
+function openConversation(id: string) {
+  openSessionId.value = id
+  selectedTaskId.value = ''
+  section.value = 'task'
 }
 
 function openTask(id: string) {
@@ -148,6 +172,7 @@ function openTask(id: string) {
 
 function newTask() {
   selectedTaskId.value = ''
+  openSessionId.value = ''
   section.value = 'task'
 }
 
@@ -400,14 +425,27 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
         <button :class="['new-task-button', { active: section === 'task' && !selectedTaskId }]" @click="newTask">
           <UiIcon name="task" /><span>新建任务</span>
         </button>
-        <div v-if="tasks.length" class="task-history">
-          <p class="task-history-label">最近任务</p>
-          <button v-for="item in tasks" :key="item.id"
-                  :class="['task-history-row', { active: selectedTaskId === item.id }]"
-                  :title="item.title" @click="openTask(item.id)">
-            <span class="task-dot" :class="item.status" aria-hidden="true"></span>
-            <span class="task-history-title">{{ item.title }}</span>
+        <div v-if="conversations.length || tasks.length" class="task-history">
+          <button class="task-history-head" type="button" :aria-expanded="!historyCollapsed" @click="toggleHistory">
+            <span>往日历史记录 <span class="count-badge">{{ conversations.length + tasks.length }}</span></span>
+            <span class="fold-caret" aria-hidden="true">{{ historyCollapsed ? '▸' : '▾' }}</span>
           </button>
+          <template v-if="!historyCollapsed">
+            <p v-if="conversations.length" class="task-history-sub">Agent 对话</p>
+            <button v-for="item in conversations" :key="item.id"
+                    :class="['task-history-row', { active: openSessionId === item.id }]"
+                    :title="item.title" @click="openConversation(item.id)">
+              <span class="task-dot done" aria-hidden="true"></span>
+              <span class="task-history-title">{{ item.pinned ? '★ ' : '' }}{{ item.title }}</span>
+            </button>
+            <p v-if="tasks.length" class="task-history-sub">旧版任务</p>
+            <button v-for="item in tasks" :key="item.id"
+                    :class="['task-history-row', { active: selectedTaskId === item.id }]"
+                    :title="item.title" @click="openTask(item.id)">
+              <span class="task-dot" :class="item.status" aria-hidden="true"></span>
+              <span class="task-history-title">{{ item.title }}</span>
+            </button>
+          </template>
         </div>
       </div>
       <div class="workspace-label">你的复习空间</div>
@@ -438,7 +476,9 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer); stopChat() })
           :course-id="courseId"
           :course-name="course?.name || ''"
           :task-id="selectedTaskId"
+          :open-session-id="openSessionId"
           @select-task="selectedTaskId = $event; loadTasks()"
+          @conversation-updated="loadTasks()"
           @navigate="section = $event as Section"
           @open-models="modelSettingsOpen = true"
           @changed="loadTasks()"

@@ -42,8 +42,8 @@ type RegistryModel = { id: string; name: string; api: string }
 type RegistryProvider = { id: string; name: string; configured: boolean; models: RegistryModel[] }
 type Registry = { providers: RegistryProvider[]; active: { provider_id: string; model_id: string } | null }
 
-const props = defineProps<{ courseId: string; courseName: string; taskId: string }>()
-const emit = defineEmits<{ 'select-task': [id: string]; navigate: [section: string]; 'open-models': []; changed: [] }>()
+const props = defineProps<{ courseId: string; courseName: string; taskId: string; openSessionId: string }>()
+const emit = defineEmits<{ 'select-task': [id: string]; navigate: [section: string]; 'open-models': []; changed: []; 'conversation-updated': [id: string] }>()
 
 const draft = ref('')
 const busy = ref(false)
@@ -563,6 +563,8 @@ async function send(text?: string, opts: { reuseUser?: boolean; versions?: strin
     if (ticker) { clearInterval(ticker); ticker = null }
     const message = current.value
     if (message && message.status === 'done' && message.text) void loadSuggestions(message, goal)
+    // 新对话落盘后通知外层刷新「往日历史记录」，否则左侧列表看不到它
+    if (conversationId.value) emit('conversation-updated', conversationId.value)
     scrollToEnd()
   }
 }
@@ -833,6 +835,10 @@ function reset() {
 watch(() => props.taskId, (id) => {
   if (id) void loadOldTask(id)
   else oldTask.value = null
+}, { immediate: true })
+
+watch(() => props.openSessionId, (id) => {
+  if (id) void openSession(id)
 }, { immediate: true })
 </script>
 
