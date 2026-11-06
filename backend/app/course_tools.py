@@ -256,7 +256,11 @@ def call(name: str, args: dict, course_id: str) -> dict:
     }.get(name)
     if handler is None:
         return {"ok": False, "text": f"没有这个课程工具：{name}"}
-    if not course_id:
+    # B 站找课是「从零建一门课」的起点，这时候本来就没有课程可选。
+    # 这几个工具不碰课程数据，不该被「先选课」挡住。
+    COURSE_FREE = {"kemai.bili_status", "kemai.bili_search",
+                   "kemai.bili_parts", "kemai.bili_transcript"}
+    if not course_id and name not in COURSE_FREE:
         return {"ok": False, "text": "当前没有选中的课程，先让用户在左边选一门课"}
     try:
         return handler(args or {}, course_id)
